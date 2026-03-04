@@ -1,64 +1,70 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 
-
-// Config reader — namespace matches package.json setting keys
+// Config reader
 function getConfig() {
   return vscode.workspace.getConfiguration('silentspec');
 }
 
-// Read individual settings like this:
-// const enabled = getConfig().get<boolean>('enabled', true);
-// const exts = getConfig().get<string[]>('supportedExtensions', ['.ts']);
-// const splitPanel = getConfig().get<boolean>('openInSplitPanel', true);
-
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
 
-	// -- API Key helpers (SecretStorage = os keychain) --
+  // API Key helpers — stored in OS keychain via SecretStorage
+  async function getApiKey(): Promise<string | undefined> {
+    return context.secrets.get('silentspec.apiKey');
+  }
 
-	async function getApiKey(): Promise<string | undefined> {
-		return context.secrets.get('silentspec.apiKey');
-	}
+  async function storeApiKey(key: string): Promise<void> {
+    await context.secrets.store('silentspec.apiKey', key);
+  }
 
-	async function storeApiKey(key: string): Promise<void> {
-		await context.secrets.store('silentspec.apiKey', key);
-	}
+  // Set API Key command
+  const setKeyCmd = vscode.commands.registerCommand(
+    'silentspec.setApiKey',
+    async () => {
+      const key = await vscode.window.showInputBox({
+        prompt: 'Enter your Claude API key',
+        password: true,
+        ignoreFocusOut: true,
+        placeHolder: 'sk-ant-...',
+      });
+      if (key && key.trim().length > 0) {
+        await storeApiKey(key.trim());
+        vscode.window.showInformationMessage('SilentSpec: API key saved securely ✓');
+      }
+    }
+  );
+  context.subscriptions.push(setKeyCmd);
 
-	// -- Set API Key command --
-	const setKeyCmd = vscode.commands.registerCommand(
-		'silentspec.setApiKey',
-		async () => {
-			const key = await vscode.window.showInputBox({
-				prompt: 'Enter your Claude API key',
-				password: true,
-				ignoreFocusOut: true,
-				placeHolder: 'sk-ant-...',
-			});
-			if (key && key?.trim().length > 0) {
-				await storeApiKey(key.trim());
-				vscode.window.showInformationMessage('SilentSpec: Claude API key saved securely ✓');
-			}
-		}
-	);
+  // Status bar toggle
+  const statusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right, 100
+  );
+  statusBar.command = 'silentspec.togglePause';
 
-	context.subscriptions.push(setKeyCmd);
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
+  let isPaused = context.workspaceState.get<boolean>('silentspec.paused', false);
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('silent-spec.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from silent-spec!');
-	});
+  function updateStatusBar() {
+    statusBar.text = isPaused ? '$(debug-pause) SS: Paused' : '$(zap) SS: On';
+    statusBar.tooltip = isPaused
+      ? 'SilentSpec paused — click to resume'
+      : 'SilentSpec active — click to pause';
+    statusBar.backgroundColor = isPaused
+      ? new vscode.ThemeColor('statusBarItem.warningBackground')
+      : undefined;
+  }
 
-	context.subscriptions.push(disposable);
+  updateStatusBar();
+  statusBar.show();
+  context.subscriptions.push(statusBar);
+
+  const toggleCmd = vscode.commands.registerCommand(
+    'silentspec.togglePause',
+    async () => {
+      isPaused = !isPaused;
+      await context.workspaceState.update('silentspec.paused', isPaused);
+      updateStatusBar();
+    }
+  );
+  context.subscriptions.push(toggleCmd);
 }
 
-// This method is called when your extension is deactivated
 export function deactivate() {}

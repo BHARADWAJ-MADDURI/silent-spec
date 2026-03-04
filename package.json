@@ -9,7 +9,9 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
   "commands": [
@@ -20,6 +22,10 @@
     {
     "command": "silentspec.setApiKey",
     "title": "SilentSpec: Set API Key"
+    },
+    {
+      "command": "silentspec.togglePause",
+      "title": "SilentSpec: Toggle Pause"
     }
   ],
   "configuration": {
