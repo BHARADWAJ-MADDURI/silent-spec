@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { registerSaveHandler, outputChannel } from './saveHandler';
 
 // Config reader
 function getConfig() {
@@ -65,6 +66,10 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(toggleCmd);
+
+	// Register save handler
+	registerSaveHandler(context, () => isPaused);
+	context.subscriptions.push(outputChannel);
 }
 
 export function deactivate() {}
