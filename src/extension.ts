@@ -2,13 +2,51 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 
+
+// Config reader — namespace matches package.json setting keys
+function getConfig() {
+  return vscode.workspace.getConfiguration('silentspec');
+}
+
+// Read individual settings like this:
+// const enabled = getConfig().get<boolean>('enabled', true);
+// const exts = getConfig().get<string[]>('supportedExtensions', ['.ts']);
+// const splitPanel = getConfig().get<boolean>('openInSplitPanel', true);
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
 
+	// -- API Key helpers (SecretStorage = os keychain) --
+
+	async function getApiKey(): Promise<string | undefined> {
+		return context.secrets.get('silentspec.apiKey');
+	}
+
+	async function storeApiKey(key: string): Promise<void> {
+		await context.secrets.store('silentspec.apiKey', key);
+	}
+
+	// -- Set API Key command --
+	const setKeyCmd = vscode.commands.registerCommand(
+		'silentspec.setApiKey',
+		async () => {
+			const key = await vscode.window.showInputBox({
+				prompt: 'Enter your Claude API key',
+				password: true,
+				ignoreFocusOut: true,
+				placeHolder: 'sk-ant-...',
+			});
+			if (key && key?.trim().length > 0) {
+				await storeApiKey(key.trim());
+				vscode.window.showInformationMessage('SilentSpec: Claude API key saved securely ✓');
+			}
+		}
+	);
+
+	context.subscriptions.push(setKeyCmd);
 	// Use the console to output diagnostic information (console.log) and errors (console.error)
 	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "silent-spec" is now active!');
 
 	// The command has been defined in the package.json file
 	// Now provide the implementation of the command with registerCommand
