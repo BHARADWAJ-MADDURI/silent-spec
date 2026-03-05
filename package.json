@@ -14,41 +14,46 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
-  "commands": [
-    {
-      "command": "silent-spec.helloWorld",
-      "title": "Hello World"
-    },
-    {
-    "command": "silentspec.setApiKey",
-    "title": "SilentSpec: Set API Key"
-    },
-    {
-      "command": "silentspec.togglePause",
-      "title": "SilentSpec: Toggle Pause"
-    }
-  ],
-  "configuration": {
-    "title": "SilentSpec",
-    "properties": {
-      "silentspec.enabled": {
-        "type": "boolean",
-        "default": true,
-        "description": "Enable or disable SilentSpec auto test generation"
+    "commands": [
+      {
+        "command": "silent-spec.helloWorld",
+        "title": "Hello World"
       },
-      "silentspec.supportedExtensions": {
-        "type": "array",
-        "default": [".ts", ".tsx", ".js", ".jsx"],
-        "description": "List of file extensions that SilentSpec will generate tests for"
+      {
+        "command": "silentspec.setApiKey",
+        "title": "SilentSpec: Set API Key"
       },
-      "silentspec.openInSplitPanel": {
-        "type": "boolean",
-        "default": true,
-        "description": "Auto-Open generated test files in a split panel"
+      {
+        "command": "silentspec.togglePause",
+        "title": "SilentSpec: Toggle Pause"
+      }
+    ],
+    "configuration": {
+      "title": "SilentSpec",
+      "properties": {
+        "silentspec.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable SilentSpec auto test generation"
+        },
+        "silentspec.supportedExtensions": {
+          "type": "array",
+          "default": [
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx"
+          ],
+          "description": "List of file extensions that SilentSpec will generate tests for"
+        },
+        "silentspec.openInSplitPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-Open generated test files in a split panel"
+        }
       }
     }
-  }
-},
+  },
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "npm run check-types && npm run lint && node esbuild.js",
@@ -64,15 +69,18 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.109.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "22.x",
-    "typescript-eslint": "^8.56.1",
-    "eslint": "^9.39.3",
+    "@types/node": "^22.19.13",
+    "@types/vscode": "^1.109.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.27.3",
+    "eslint": "^9.39.3",
     "npm-run-all": "^4.1.5",
     "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "typescript-eslint": "^8.56.1"
+  },
+  "dependencies": {
+    "@typescript-eslint/typescript-estree": "^8.56.1"
   }
 }

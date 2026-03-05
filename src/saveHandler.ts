@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { analyzeFile } from './astAnalyzer';
 
 // Output channel - visibile in View -> Output -> SilentSpec
 
@@ -36,11 +37,10 @@ function shouldSkip(filePath: string): {skip: boolean, reason?: string} {
 export function registerSaveHandler(
   context: vscode.ExtensionContext,
   isPausedFn: () => boolean
-) : void {
-
+) : void { 
   log('SilentSpec save handler registered');
 
-  let debounceTimer: NodeJS.Timeout | undefined;
+  const debounceTimers = new Map<string, NodeJS.Timeout>();
 
   const saveListner = vscode.workspace.onDidSaveTextDocument(
     (document: vscode.TextDocument) => {
@@ -57,18 +57,22 @@ export function registerSaveHandler(
         return;
       }
 
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
+      const existing = debounceTimers.get(filePath);
+      if (existing) {
+        clearTimeout(existing);
       }
-
       log(`Save detected: ${filePath} - waiting 2s...`);
+      debounceTimers.set(filePath, setTimeout(() => {
+        debounceTimers.delete(filePath);
 
-      debounceTimer = setTimeout(() => {
-        log(`Debounce complete - ready to generate spec for: ${filePath}`);
-      
-      }, 2000);
-    }
-  );
-
+        const result = analyzeFile(filePath);
+        if (!result.isTestable) {
+          log(`Skipped: ${result.skipReason} - ${filePath}`);
+          return;
+        }
+        log(`Testable: found [${result.exportedFunctions.join(', ')}] in ${filePath}`);
+      }, 2000));
+    
   context.subscriptions.push(saveListner);
-};
+  });
+}
