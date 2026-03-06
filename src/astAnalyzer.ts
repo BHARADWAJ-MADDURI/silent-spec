@@ -3,7 +3,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 export interface ASTAnalysisResult {
-
   isTestable: boolean;
   exportedFunctions: string[];
   imports: ImportInfo[];
@@ -22,50 +21,84 @@ function parseFile(fileContent: string) {
       jsx: true,
       tokens: false,
       range: false,
+      loc: false,
+      comment: false,
     });
   } catch {
     return null;
   }
 }
 
-function extractExportedFunctions(ast: any): string[] {
-  const exported: string[] = [];
-  
+function extractExportedFunctions(ast: any, filePath: string): string[] {
+  const exported = new Set<string>();
+  const fileName = path.basename(filePath, path.extname(filePath));
+
   for (const node of ast.body) {
-    if (node.type !== 'ExportNamedDeclaration') {
-      continue;
-    }
-    if (!node.declaration) {
-      continue;
-    }
-    const dec1 = node.declaration;
+    // Type-only exports (TSInterfaceDeclaration, TSTypeAliasDeclaration) 
+    // intentionally ignored — not testable
 
-    if (dec1.type === 'FunctionDeclaration' && dec1.id?.name) {
-      exported.push(dec1.id.name);
-    }
+    // Barrel re-exports (ExportAllDeclaration: export * from './utils')
+    // intentionally ignored — no direct logic to test
+    // Named exports
+    if (node.type === 'ExportNamedDeclaration') {
+      if (node.declaration) {
+        const decl = node.declaration;
 
-    if  (dec1.type === 'ClassDeclaration' && dec1.id?.name) {
-      exported.push(dec1.id.name);
-    }
-
-    if (dec1.type === 'VariableDeclaration') {
-      for (const declarator of dec1.declarations) {
-        const init = declarator.init;
-        if (
-          init?.type === 'ArrowFunctionExpression' || 
-          init.type === 'FunctionExpression'
-        ) {
-          exported.push(declarator.id.name);
+        if (decl.type === 'FunctionDeclaration' && decl.id?.name) {
+          exported.add(decl.id.name);
         }
+
+        if (decl.type === 'ClassDeclaration' && decl.id?.name) {
+          exported.add(decl.id.name);
+        }
+
+        if (decl.type === 'VariableDeclaration') {
+          for (const declarator of decl.declarations) {
+            if (declarator.id.type !== 'Identifier') {
+              continue;
+            }
+            const init = declarator.init;
+            if (
+              init?.type === 'ArrowFunctionExpression' ||
+              init?.type === 'FunctionExpression'
+            ) {
+              exported.add(declarator.id.name);
+            }
+          }
+        }
+      }
+
+      // Late exports: export { sum } or export { sum as total }
+      if (node.specifiers?.length > 0 && !node.source) {
+        for (const specifier of node.specifiers) {
+          if (specifier.exported?.name) {
+            exported.add(specifier.exported.name);
+          }
+        }
+      }
+    }
+
+    // Default exports
+    if (node.type === 'ExportDefaultDeclaration') {
+      const decl = node.declaration;
+
+      if (decl.type === 'FunctionDeclaration') {
+        exported.add(decl.id?.name ?? fileName);
+      } else if (decl.type === 'ClassDeclaration') {
+        exported.add(decl.id?.name ?? fileName);
+      } else if (
+        decl.type === 'ArrowFunctionExpression' ||
+        decl.type === 'FunctionExpression'
+      ) {
+        exported.add(fileName);
       }
     }
   }
 
-  return exported;
+  return [...exported];
 }
 
 function extractImports(ast: any, filePath: string): ImportInfo[] {
-
   const imports: ImportInfo[] = [];
   const fileDir = path.dirname(filePath);
 
@@ -75,54 +108,57 @@ function extractImports(ast: any, filePath: string): ImportInfo[] {
     }
     const source = node.source.value as string;
     const isLocal = source.startsWith('./') || source.startsWith('../');
-    
+
     let resolvedPath: string | undefined;
 
     if (isLocal) {
-    // Try resolving with common extensions
-    const exts = ['.ts', '.tsx', '.js', '.jsx', ''];
-    for  (const ext of exts) {
-      const candidate = path.resolve(fileDir, source + ext);
-      if (fs.existsSync(candidate)) {
-        resolvedPath = candidate;
-        break;
+      const exts = ['.ts', '.tsx', '.js', '.jsx'];
+      const candidates = [
+        ...exts.map(e => path.resolve(fileDir, source + e)),
+        ...exts.map(e => path.resolve(fileDir, source, 'index' + e))
+      ];
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          resolvedPath = candidate;
+          break;
+        }
       }
-    } 
     }
+
     imports.push({ source, isLocal, resolvedPath });
   }
+
   return imports;
 }
 
-export function analyzeFile(filePath: string): ASTAnalysisResult {
-
+export function analyzeFile(
+  filePath: string,
+  log?: (msg: string) => void
+): ASTAnalysisResult {
   let fileContent: string;
   try {
     fileContent = fs.readFileSync(filePath, 'utf8');
   } catch {
-    return  { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'cannot read file' };
+    return { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'cannot read file' };
   }
 
-  // Parse to AST
   const ast = parseFile(fileContent);
   if (!ast) {
     return { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'syntax error' };
   }
 
-  // Detect exported Functions 
-  const exportedFunctions = extractExportedFunctions(ast);
+  const exportedFunctions = extractExportedFunctions(ast, filePath);
   if (exportedFunctions.length === 0) {
-    return { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'no exported functions' };
+    return { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'no testable exports' };
   }
 
-  // Extract and validate imports
   const imports = extractImports(ast, filePath);
-
   const brokenImport = imports.find(i => i.isLocal && !i.resolvedPath);
   if (brokenImport) {
-    return { isTestable: false, exportedFunctions: [], imports, skipReason: `unresolvable import: ${brokenImport.source}` };
+    // Warn but don't skip — project might use path aliases (@/utils, ~/utils)
+    log?.(`Warning: unresolvable import ${brokenImport.source} — may use path aliases, continuing...`);
+
   }
 
-  return { isTestable: true, exportedFunctions, imports };  
- 
+  return { isTestable: true, exportedFunctions, imports };
 }
