@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { analyzeFile } from './astAnalyzer';
 import { extractContext } from './contextExtractor';
+import { buildPrompt } from './promptBuilder';
 
 // Output channel - visible in View -> Output -> SilentSpec
 export const outputChannel = vscode.window.createOutputChannel('SilentSpec');
@@ -85,7 +86,20 @@ export function registerSaveHandler(
         );
         log(`Context ready — framework=${silentSpecContext.framework}, pattern=${silentSpecContext.testPatternSample ? 'found' : 'none'}`);
 
-        // Phase 4 — Prompt builder goes here
+        // Phase 4 — Prompt builder
+        const context = extractContext(
+          filePath,
+          result.exportedFunctions,
+          result.imports,
+          log
+        );
+        const prompt = buildPrompt(context);
+        log('=== SILENTSPEC PROMPT START ===');
+        log(prompt);
+        log('=== SILENTSPEC PROMPT END ===');
+
+        // Phase 5 will replace the log lines with: await callClaudeAPI(prompt, log);
+
 
       }, 2000));
     }
