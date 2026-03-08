@@ -50,6 +50,18 @@
           "type": "boolean",
           "default": true,
           "description": "Auto-Open generated test files in a split panel"
+        },
+        "silentspec.provider": {
+          "type": "string",
+          "enum": ["claude", "openai"],
+          "default": "claude",
+          "description": "AI provider for test generation"
+        },
+        "silentspec.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model override. Leave empty to use provider default.",
+          "markdownDescription": "Leave empty to use defaults: claude-sonnet-4-20250514 (Claude) / gpt-4o (OpenAI)"
         }
       }
     }

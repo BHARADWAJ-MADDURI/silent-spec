@@ -3,7 +3,6 @@ import { analyzeFile } from './astAnalyzer';
 import { extractContext } from './contextExtractor';
 import { buildPrompt } from './promptBuilder';
 
-// Output channel - visible in View -> Output -> SilentSpec
 export const outputChannel = vscode.window.createOutputChannel('SilentSpec');
 
 function getConfig() {
@@ -38,7 +37,8 @@ function shouldSkip(filePath: string): { skip: boolean; reason?: string } {
 
 export function registerSaveHandler(
   context: vscode.ExtensionContext,
-  isPausedFn: () => boolean
+  isPausedFn: () => boolean,
+  onPromptReady: (prompt: string, filePath: string, log: (msg: string) => void) => Promise<void>
 ): void {
   log('SilentSpec save handler registered');
 
@@ -77,34 +77,23 @@ export function registerSaveHandler(
         }
         log(`Testable: [${result.exportedFunctions.join(', ')}] — ${filePath}`);
 
-        // Phase 3 — Context extraction
-        const silentSpecContext = extractContext(
+        // Context extraction and prompt build
+        const ctx = extractContext(
           filePath,
           result.exportedFunctions,
           result.imports,
           log
         );
-        log(`Context ready — framework=${silentSpecContext.framework}, pattern=${silentSpecContext.testPatternSample ? 'found' : 'none'}`);
+        log(`Context ready — framework=${ctx.framework}, pattern=${ctx.testPatternSample ? 'found' : 'none'}`);
 
-        // Phase 4 — Prompt builder
-        const context = extractContext(
-          filePath,
-          result.exportedFunctions,
-          result.imports,
-          log
-        );
-        const prompt = buildPrompt(context);
-        log('=== SILENTSPEC PROMPT START ===');
-        log(prompt);
-        log('=== SILENTSPEC PROMPT END ===');
+        const prompt = buildPrompt(ctx);
 
-        // Phase 5 will replace the log lines with: await callClaudeAPI(prompt, log);
-
+        // Phase 5 — hand off to provider via callback
+        void onPromptReady(prompt, filePath, log);
 
       }, 2000));
     }
   );
 
-  // ✅ Fixed: push listener to subscriptions OUTSIDE the setTimeout
   context.subscriptions.push(saveListener);
 }
