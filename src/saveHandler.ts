@@ -35,10 +35,12 @@ function shouldSkip(filePath: string): { skip: boolean; reason?: string } {
   return { skip: false };
 }
 
+const pendingRequests = new Map<string, AbortController>();
+
 export function registerSaveHandler(
   context: vscode.ExtensionContext,
   isPausedFn: () => boolean,
-  onPromptReady: (prompt: string, filePath: string, log: (msg: string) => void) => Promise<void>
+  onPromptReady: (prompt: string, filePath: string, log: (msg: string) => void, abortSignal: AbortSignal) => Promise<void>
 ): void {
   log('SilentSpec save handler registered');
 
@@ -89,8 +91,16 @@ export function registerSaveHandler(
         const prompt = buildPrompt(ctx);
 
         // Phase 5 — hand off to provider via callback
-        void onPromptReady(prompt, filePath, log);
+        const existing = pendingRequests.get(filePath);
+        if (existing) {
+          existing.abort();
+          pendingRequests.delete(filePath);
+        }
 
+        const controller = new AbortController();
+        pendingRequests.set(filePath, controller);
+
+        void onPromptReady(prompt, filePath, log, controller.signal);
       }, 2000));
     }
   );

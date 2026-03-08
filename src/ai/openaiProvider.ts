@@ -23,7 +23,8 @@ export class OpenAIProvider implements AIProvider {
  
   async generateTests(
     prompt: string,
-    log: (msg: string) => void
+    log: (msg: string) => void,
+    abortSignal?: AbortSignal
   ): Promise<string | null> {
     const apiKey = await this.secrets.get('silentspec.openaiApiKey');
  
@@ -31,10 +32,18 @@ export class OpenAIProvider implements AIProvider {
       log('Error: OpenAI API key not set — run SilentSpec: Set API Key');
       return null;
     }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+
+    // If external signal aborts (re-save cancellation), abort this controller too
+    abortSignal?.addEventListener('abort', () => controller.abort());
+
  
     try {
       const response = await fetch(API_URL, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
@@ -48,6 +57,8 @@ export class OpenAIProvider implements AIProvider {
           ],
         }),
       });
+
+      clearTimeout(timeout);
  
       if (!response.ok) {
         log(`Error: OpenAI API returned ${response.status} ${response.statusText}`);
@@ -61,6 +72,11 @@ export class OpenAIProvider implements AIProvider {
       return data.choices[0]?.message?.content || null;
  
     } catch (error: unknown) {
+      clearTimeout(timeout);
+      if (error instanceof Error && error.name === 'AbortError') {
+        log('Warning: OpenAI API request aborted — timeout or re-save cancellation');
+        return null;
+      }
       const msg = error instanceof Error ? error.message : String(error);
       log(`Error: OpenAI API call failed — ${msg}`);
       return null;

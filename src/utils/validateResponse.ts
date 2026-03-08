@@ -3,6 +3,11 @@ export function validateResponse(
   log: (msg: string) => void
 ): string | null {
 
+  const sanitized = raw
+    .replace(/^```[a-z]*\n?/gim, '')
+    .replace(/^```$/gim, '')
+    .trim();
+
   const hasStart = raw.includes('// <SS-GENERATED-START>');
   const hasEnd = raw.includes('// <SS-GENERATED-END>');
 

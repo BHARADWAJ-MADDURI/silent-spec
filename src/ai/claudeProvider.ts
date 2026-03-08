@@ -25,7 +25,8 @@ export class ClaudeProvider implements AIProvider {
 
   async generateTests(
     prompt: string,
-    log: (msg: string) => void
+    log: (msg: string) => void,
+    abortSignal?: AbortSignal
   ): Promise<string | null> {
     const apiKey = await this.secrets.get('silentspec.claudeApiKey');
 
@@ -33,10 +34,16 @@ export class ClaudeProvider implements AIProvider {
       log('Error: Claude API key not set — run SilentSpec: Set API Key');
       return null;
     }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+
+    // If external signal aborts (re-save cancellation), abort this controller too
+    abortSignal?.addEventListener('abort', () => controller.abort());
 
     try {
       const response = await fetch(API_URL, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
@@ -49,6 +56,8 @@ export class ClaudeProvider implements AIProvider {
           messages: [{ role: 'user', content: prompt }],
         }),
       });
+
+      clearTimeout(timeout);
 
       if (!response.ok) {
         const errorBody = await response.text();
@@ -68,6 +77,11 @@ export class ClaudeProvider implements AIProvider {
       return text || null;
 
     } catch (error: unknown) {
+      clearTimeout(timeout);
+      if (error instanceof Error && error.name === 'AbortError') {
+        log('Warning: Claude API request aborted — timeout or re-save cancellation');
+        return null;
+      }
       const msg = error instanceof Error ? error.message : String(error);
       log(`Error: Claude API call failed — ${msg}`);
       return null;

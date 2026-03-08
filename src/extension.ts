@@ -90,7 +90,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(setKeyCmd);
 
   // ── Register save handler — debounce lives in saveHandler.ts ───────────────
-  registerSaveHandler(context, () => isPaused, async (prompt, filePath, log) => {
+  registerSaveHandler(context, () => isPaused, async (prompt, filePath, log, abortSignal) => {
     const config = vscode.workspace.getConfiguration('silentspec');
     const providerName = config.get<string>('provider', 'claude');
 
@@ -99,7 +99,7 @@ export function activate(context: vscode.ExtensionContext) {
       updateStatusBar('$(loading~spin) SS: Generating...');
 
       const provider = getProvider(context);
-      const raw = await provider.generateTests(prompt, log);
+      const raw = await provider.generateTests(prompt, log, abortSignal);
 
       if (!raw) {
         updateStatusBar('$(warning) SS: Failed');
