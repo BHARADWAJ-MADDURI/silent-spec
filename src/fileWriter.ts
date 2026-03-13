@@ -12,42 +12,35 @@ const SS_USER_END     = '// </SS-USER-TESTS>';
 // Convention detection
 
 async function detectNamingConvention(dir: string): Promise<'.spec.ts' | '.test.ts'> {
-  // 1. Same directory — fastest
   try {
     const files = fs.readdirSync(dir);
     if (files.some(f => f.endsWith('.test.ts') || f.endsWith('.test.tsx'))) { return '.test.ts'; }
     if (files.some(f => f.endsWith('.spec.ts') || f.endsWith('.spec.tsx'))) { return '.spec.ts'; }
   } catch { /* fall through */ }
 
-  // 2. Workspace-level scan — covers monorepos, max 1 result for performance
   const testFiles = await vscode.workspace.findFiles('**/*.test.ts', '**/node_modules/**', 1);
   const specFiles = await vscode.workspace.findFiles('**/*.spec.ts', '**/node_modules/**', 1);
 
   if (testFiles.length > 0) { return '.test.ts'; }
   if (specFiles.length > 0) { return '.spec.ts'; }
 
-  return '.spec.ts'; // default
+  return '.spec.ts';
 }
 
-// Spec file placement — exported so extension.ts can pass specPath to promptBuilder
-
 export async function resolveSpecPath(sourcePath: string): Promise<string> {
-  const ext  = path.extname(sourcePath);       // .ts | .tsx | .js | .jsx
-  const base = path.basename(sourcePath, ext); // PatientCard
+  const ext  = path.extname(sourcePath);
+  const base = path.basename(sourcePath, ext);
   const dir  = path.dirname(sourcePath);
 
-  const convention = await detectNamingConvention(dir); // .spec.ts | .test.ts
+  const convention = await detectNamingConvention(dir);
 
-  // Mirror source extension — .tsx → .spec.tsx, .jsx → .spec.jsx, .ts/.js → convention
   const specExt = ext === '.tsx' ? '.spec.tsx'
                 : ext === '.jsx' ? '.spec.jsx'
                 : convention;
 
   const specName = `${base}${specExt}`;
-
   const testDirs = ['__tests__', 'tests', 'test'];
 
-  // 1. Check same directory for test folders
   for (const testDir of testDirs) {
     const potentialPath = path.join(dir, testDir);
     if (fs.existsSync(potentialPath) &&
@@ -56,7 +49,6 @@ export async function resolveSpecPath(sourcePath: string): Promise<string> {
     }
   }
 
-  // 2. Check workspace root — monorepo support
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot && workspaceRoot !== dir) {
     for (const testDir of testDirs) {
@@ -70,7 +62,6 @@ export async function resolveSpecPath(sourcePath: string): Promise<string> {
     }
   }
 
-  // 3. Default — co-located
   return path.join(dir, specName);
 }
 
@@ -131,7 +122,6 @@ function buildUpdatedFileContent(
     ].join('');
   }
 
-  // Ensure SS-USER-TESTS section always exists — re-add if manually deleted
   if (!result.includes(SS_USER_START)) {
     log('Notice: SS-USER-TESTS section missing — restoring');
     result = result.trimEnd() + '\n' + [
@@ -144,16 +134,16 @@ function buildUpdatedFileContent(
   return result;
 }
 
-// Main writer
+// Internal writer — accepts already-resolved specPath, called by both
+// writeSpecFile and mergeSpecFile to avoid resolving specPath twice
 
-export async function writeSpecFile(
-  sourcePath: string,
+async function writeSpecFileToPath(
+  specPath: string,
   validated: string,
   log: (msg: string) => void
 ): Promise<void> {
-  const specPath = await resolveSpecPath(sourcePath);
-  const specUri  = vscode.Uri.file(specPath);
-  const isNew    = !fs.existsSync(specPath);
+  const specUri = vscode.Uri.file(specPath);
+  const isNew   = !fs.existsSync(specPath);
 
   const finalContent = isNew
     ? buildNewFileContent(validated)
@@ -204,4 +194,73 @@ export async function writeSpecFile(
     const msg = error instanceof Error ? error.message : String(error);
     log(`Error: file writer failed for ${path.basename(specPath)} — ${msg}`);
   }
+}
+
+// Public API — resolves specPath then delegates to writeSpecFileToPath
+
+export async function writeSpecFile(
+  sourcePath: string,
+  validated: string,
+  log: (msg: string) => void
+): Promise<void> {
+  const specPath = await resolveSpecPath(sourcePath);
+  await writeSpecFileToPath(specPath, validated, log);
+}
+
+// Gap Finder merge writer — appends gap tests to existing SS-GENERATED block
+// Resolves specPath once, reuses it for both read and write
+
+export async function mergeSpecFile(
+  sourcePath: string,
+  newContent: string,
+  log: (msg: string) => void
+): Promise<void> {
+  const specPath = await resolveSpecPath(sourcePath); // resolved once — reused below
+
+  const strippedNew = newContent
+    .replace(/^\/\/ <SS-GENERATED-START>\s*/m, '')
+    .replace(/\/\/ <SS-GENERATED-END>\s*$/m, '')
+    .trim();
+
+  if (!strippedNew) {
+    log('Warning: gap generation returned empty content — spec file unchanged');
+    return;
+  }
+
+  let existingGenerated = '';
+
+  if (fs.existsSync(specPath)) {
+    try {
+      const specBytes = await vscode.workspace.fs.readFile(
+        vscode.Uri.file(specPath)
+      );
+      const specContent = Buffer.from(specBytes).toString('utf8');
+
+      const startIdx = specContent.indexOf(SS_START);
+      const endIdx   = specContent.indexOf(SS_END);
+
+      if (startIdx !== -1 && endIdx !== -1) {
+        existingGenerated = specContent
+          .slice(startIdx + SS_START.length, endIdx)
+          .trim();
+        log('Gap merge: extracted existing SS-GENERATED block');
+      }
+    } catch {
+      log('Gap merge: could not read existing spec — writing fresh');
+    }
+  }
+
+  const combined = existingGenerated
+    ? `${existingGenerated}\n\n${strippedNew}`
+    : strippedNew;
+
+  const merged = [
+    SS_START,
+    combined,
+    SS_END,
+  ].join('\n');
+
+  // Pass resolved specPath directly — no second resolveSpecPath call
+  await writeSpecFileToPath(specPath, merged, log);
+  log('Gap merge: spec file updated — gap tests appended to SS-GENERATED block');
 }
