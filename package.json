@@ -62,6 +62,11 @@
           "default": "",
           "description": "Model override. Leave empty to use provider default.",
           "markdownDescription": "Leave empty to use defaults: claude-sonnet-4-20250514 (Claude) / gpt-4o (OpenAI)"
+        },
+        "silentspec.openSpecOnCreate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the generated spec file in a split panel when first created."
         }
       }
     }

@@ -5,8 +5,9 @@ import { ClaudeProvider } from './ai/claudeProvider';
 import { AIProvider } from './ai/aiProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
+import { writeSpecFile } from './fileWriter';
 
-// ── Provider factory —─────────────────────────────────────────────────────────
+// Provider factory 
 function getProvider(context: vscode.ExtensionContext): AIProvider {
   const config = vscode.workspace.getConfiguration('silentspec');
   const providerName = config.get<string>('provider', 'claude');
@@ -20,7 +21,7 @@ function getProvider(context: vscode.ExtensionContext): AIProvider {
 
 export function activate(context: vscode.ExtensionContext) {
 
-  // ── Status bar ──────────────────────────────────────────────────────────────
+  // Status bar 
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right, 100
   );
@@ -47,7 +48,7 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar.show();
   context.subscriptions.push(statusBar);
 
-  // ── Toggle pause command ────────────────────────────────────────────────────
+  // Toggle pause command 
   const toggleCmd = vscode.commands.registerCommand(
     'silentspec.togglePause',
     async () => {
@@ -58,7 +59,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(toggleCmd);
 
-  // ── Set API key command — handles both providers ────────────────────────────
+  // Set API key command — handles both providers
   const setKeyCmd = vscode.commands.registerCommand(
     'silentspec.setApiKey',
     async () => {
@@ -89,7 +90,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(setKeyCmd);
 
-  // ── Register save handler — debounce lives in saveHandler.ts ───────────────
+  // Register save handler — debounce lives in saveHandler.ts 
   registerSaveHandler(context, () => isPaused, async (prompt, filePath, log, abortSignal) => {
     const config = vscode.workspace.getConfiguration('silentspec');
     const providerName = config.get<string>('provider', 'claude');
@@ -117,9 +118,9 @@ export function activate(context: vscode.ExtensionContext) {
         log(`Warning: partial generation — token limit reached for ${filePath}`);
         updateStatusBar('$(warning) SS: Partial');
       }
-
-      // Phase 6 receives validated here
-      log(`Response validated — passing to file writer for ${filePath}`);
+      
+      log(`Response validated — writing spec file for ${filePath}`);
+      await writeSpecFile(filePath, validated, log);
       updateStatusBar('$(check) SS: Done');
     });
   });

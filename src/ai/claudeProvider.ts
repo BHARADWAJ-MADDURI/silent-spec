@@ -1,5 +1,3 @@
-// src/ai/claudeProvider.ts
-
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
 
