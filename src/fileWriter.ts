@@ -29,9 +29,9 @@ async function detectNamingConvention(dir: string): Promise<'.spec.ts' | '.test.
   return '.spec.ts'; // default
 }
 
-// Spec file placement
+// Spec file placement — exported so extension.ts can pass specPath to promptBuilder
 
-async function resolveSpecPath(sourcePath: string): Promise<string> {
+export async function resolveSpecPath(sourcePath: string): Promise<string> {
   const ext  = path.extname(sourcePath);       // .ts | .tsx | .js | .jsx
   const base = path.basename(sourcePath, ext); // PatientCard
   const dir  = path.dirname(sourcePath);
@@ -65,7 +65,6 @@ async function resolveSpecPath(sourcePath: string): Promise<string> {
           fs.lstatSync(rootTestPath).isDirectory()) {
         const relativePath = path.relative(workspaceRoot, dir);
         const mirroredPath = path.join(rootTestPath, relativePath);
-        // Pure path resolution — no side effects, no mkdirSync here
         return path.join(mirroredPath, specName);
       }
     }
@@ -89,7 +88,6 @@ function buildNewFileContent(validated: string): string {
     SS_START,
     inner,
     SS_END,
-    '',
     SS_USER_START,
     SS_USER_CONTENT,
     SS_USER_END,
@@ -118,7 +116,6 @@ function buildUpdatedFileContent(
       SS_START,
       newInner,
       SS_END,
-      '',
       existing.trim(),
     ].join('\n');
   } else {
@@ -137,7 +134,7 @@ function buildUpdatedFileContent(
   // Ensure SS-USER-TESTS section always exists — re-add if manually deleted
   if (!result.includes(SS_USER_START)) {
     log('Notice: SS-USER-TESTS section missing — restoring');
-    result = result.trimEnd() + '\n\n' + [
+    result = result.trimEnd() + '\n' + [
       SS_USER_START,
       SS_USER_CONTENT,
       SS_USER_END,
@@ -166,7 +163,6 @@ export async function writeSpecFile(
     const edit = new vscode.WorkspaceEdit();
 
     if (isNew) {
-      // mkdirSync here covers all cases including mirrored monorepo paths
       fs.mkdirSync(path.dirname(specPath), { recursive: true });
 
       edit.createFile(specUri, {

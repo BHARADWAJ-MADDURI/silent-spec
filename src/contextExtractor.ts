@@ -18,6 +18,7 @@ export interface SilentSpecContext {
   isNextJS: boolean;
   isGraphQL: boolean;
   isPrisma: boolean;
+  specPath?: string;
 }
 
 export interface MockHint {
