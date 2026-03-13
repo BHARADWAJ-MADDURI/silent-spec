@@ -53,7 +53,13 @@
         },
         "silentspec.provider": {
           "type": "string",
-          "enum": ["ollama","claude", "openai"],
+          "enum": ["ollama","claude", "openai", "github"],
+          "enumDescriptions": [
+            "Free local generation via Ollama — no API key needed",
+            "Claude (Anthropic) — best quality, requires API key",
+            "GPT-4o (OpenAI) — requires API key",
+            "GitHub Models — free tier, requires GitHub Personal Access Token"
+          ],
           "default": "ollama",
           "description": "AI provider. Use 'ollama' for free local generation. 'claude' or 'openai' require an API key and internet connection."
         },
