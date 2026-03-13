@@ -8,20 +8,20 @@ export function validateResponse(
     .replace(/^```$/gim, '')
     .trim();
 
-  const hasStart = raw.includes('// <SS-GENERATED-START>');
-  const hasEnd = raw.includes('// <SS-GENERATED-END>');
+  const hasStart = sanitized.includes('// <SS-GENERATED-START>');
+  const hasEnd   = sanitized.includes('// <SS-GENERATED-END>');
 
   if (!hasStart) {
     log('Warning: model returned response with no SS-GENERATED-START marker — discarding');
     return null;
   }
- 
+
   if (!hasEnd) {
     log('Warning: model response missing SS-GENERATED-END — appending closing marker');
-    return raw.trimEnd() + '\n// <SS-GENERATED-END>';
+    return sanitized.trimEnd() + '\n// <SS-GENERATED-END>';
   }
 
-  const content = raw
+  const content = sanitized
     .split('// <SS-GENERATED-START>')[1]
     ?.split('// <SS-GENERATED-END>')[0]
     ?.trim();
@@ -31,5 +31,5 @@ export function validateResponse(
     return null;
   }
 
-  return raw;
+  return sanitized;
 }
