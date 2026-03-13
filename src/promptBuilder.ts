@@ -188,6 +188,29 @@ function buildSelfCorrectionBlock(): string {
   ].join('\n');
 }
 
+function buildDependencySection(ctx: SilentSpecContext): string {
+  const { dependencyContext } = ctx;
+
+  if (dependencyContext.length === 0) {
+    return '';
+  }
+
+  const sections = dependencyContext.map(dep => [
+    `### ${dep.source}`,
+    '```typescript',
+    dep.summary,
+    '```',
+  ].join('\n'));
+
+  return [
+    '## Local Dependency Signatures',
+    'These are the actual exported types and function signatures from the',
+    'imported local files. Use these to write correct mocks and assertions',
+    '— do not guess prop names or return types.',
+    ...sections,
+  ].join('\n\n');
+}
+
 /**
  * Assembles a complete Claude prompt from the extracted context.
  * Returns a single string ready to pass to callClaudeAPI().
@@ -202,7 +225,8 @@ export function buildPrompt(ctx: SilentSpecContext): string {
     buildPatternSection(ctx.testPatternSample),
     buildMockSection(ctx.mockHints),
     buildProjectTypeSection(ctx),
+    buildDependencySection(ctx), 
     buildOutputInstruction(),
     buildSelfCorrectionBlock(),
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 }

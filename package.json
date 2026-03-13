@@ -53,14 +53,14 @@
         },
         "silentspec.provider": {
           "type": "string",
-          "enum": ["claude", "openai"],
-          "default": "claude",
-          "description": "AI provider for test generation"
+          "enum": ["ollama","claude", "openai"],
+          "default": "ollama",
+          "description": "AI provider. Use 'ollama' for free local generation. 'claude' or 'openai' require an API key and internet connection."
         },
         "silentspec.model": {
           "type": "string",
           "default": "",
-          "description": "Model override. Leave empty to use provider default.",
+          "description": "Model name. Leave empty for provider default (ollama: deepseek-coder:6.7b, claude: claude-sonnet-4-20250514, openai: gpt-4o)",
           "markdownDescription": "Leave empty to use defaults: claude-sonnet-4-20250514 (Claude) / gpt-4o (OpenAI)"
         },
         "silentspec.openSpecOnCreate": {

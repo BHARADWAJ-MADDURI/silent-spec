@@ -1,27 +1,37 @@
 import * as vscode from 'vscode';
 import { registerSaveHandler, outputChannel } from './saveHandler';
+import { AIProvider } from './ai/aiProvider';
 import { OpenAIProvider } from './ai/openaiProvider';
 import { ClaudeProvider } from './ai/claudeProvider';
-import { AIProvider } from './ai/aiProvider';
+import { OllamaProvider } from './ai/ollamaProvider';
+import { GitHubModelsProvider } from './ai/githubModelsProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
 import { writeSpecFile } from './fileWriter';
 
-// Provider factory 
+// Provider factory
 function getProvider(context: vscode.ExtensionContext): AIProvider {
   const config = vscode.workspace.getConfiguration('silentspec');
-  const providerName = config.get<string>('provider', 'claude');
+  const providerName = config.get<string>('provider', 'ollama');
   const modelOverride = config.get<string>('model', '') || undefined;
 
   if (providerName === 'openai') {
     return new OpenAIProvider(modelOverride).withSecrets(context.secrets);
   }
-  return new ClaudeProvider(modelOverride).withSecrets(context.secrets);
+
+  if (providerName === 'claude') {
+    return new ClaudeProvider(modelOverride).withSecrets(context.secrets);
+  }
+  if (providerName === 'github') {
+    return new GitHubModelsProvider(modelOverride).withSecrets(context.secrets);
+  }
+  // Default — Ollama, free, no API key needed
+  return new OllamaProvider(modelOverride);
 }
 
 export function activate(context: vscode.ExtensionContext) {
 
-  // Status bar 
+  // Status bar
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right, 100
   );
@@ -48,7 +58,7 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar.show();
   context.subscriptions.push(statusBar);
 
-  // Toggle pause command 
+  // Toggle pause command
   const toggleCmd = vscode.commands.registerCommand(
     'silentspec.togglePause',
     async () => {
@@ -64,7 +74,7 @@ export function activate(context: vscode.ExtensionContext) {
     'silentspec.setApiKey',
     async () => {
       const provider = await vscode.window.showQuickPick(
-        ['claude', 'openai'],
+        ['claude', 'openai', 'github'],
         { placeHolder: 'Select provider to set API key for' }
       );
       if (!provider) { return; }
@@ -80,20 +90,28 @@ export function activate(context: vscode.ExtensionContext) {
 
       const secretKey = provider === 'claude'
         ? 'silentspec.claudeApiKey'
+        : provider === 'github'
+        ? 'silentspec.githubToken'
         : 'silentspec.openaiApiKey';
+      
+      const displayName = provider === 'claude'
+        ? 'Claude'
+        : provider === 'github'
+        ? 'GitHub'
+        : 'OpenAI';
 
       await context.secrets.store(secretKey, key.trim());
       vscode.window.showInformationMessage(
-        `SilentSpec: ${provider === 'claude' ? 'Claude' : 'OpenAI'} API key saved ✓`
+        `SilentSpec: ${displayName} API key saved ✓`
       );
     }
   );
   context.subscriptions.push(setKeyCmd);
 
-  // Register save handler — debounce lives in saveHandler.ts 
+  // Register save handler
   registerSaveHandler(context, () => isPaused, async (prompt, filePath, log, abortSignal) => {
     const config = vscode.workspace.getConfiguration('silentspec');
-    const providerName = config.get<string>('provider', 'claude');
+    const providerName = config.get<string>('provider', 'ollama');
 
     processingQueue.enqueue(async () => {
       log(`Calling ${providerName} for ${filePath}...`);
@@ -118,9 +136,11 @@ export function activate(context: vscode.ExtensionContext) {
         log(`Warning: partial generation — token limit reached for ${filePath}`);
         updateStatusBar('$(warning) SS: Partial');
       }
-      
+
       log(`Response validated — writing spec file for ${filePath}`);
       await writeSpecFile(filePath, validated, log);
+
+      setTimeout(() => updateStatusBar(), 3000);
       updateStatusBar('$(check) SS: Done');
     });
   });

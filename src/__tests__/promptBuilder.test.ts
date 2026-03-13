@@ -12,6 +12,7 @@ const base = {
   isNextJS: false,
   isGraphQL: false,
   isPrisma: false,
+  dependencyContext: [],
 };
  
 describe('buildPrompt', () => {

@@ -1,7 +1,9 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { analyzeFile } from './astAnalyzer';
 import { extractContext } from './contextExtractor';
 import { buildPrompt } from './promptBuilder';
+import { resolveSpecPath } from './fileWriter';
 
 export const outputChannel = vscode.window.createOutputChannel('SilentSpec');
 
@@ -40,7 +42,12 @@ const pendingRequests = new Map<string, AbortController>();
 export function registerSaveHandler(
   context: vscode.ExtensionContext,
   isPausedFn: () => boolean,
-  onPromptReady: (prompt: string, filePath: string, log: (msg: string) => void, abortSignal: AbortSignal) => Promise<void>
+  onPromptReady: (
+    prompt: string,
+    filePath: string,
+    log: (msg: string) => void,
+    abortSignal: AbortSignal
+  ) => Promise<void>
 ): void {
   log('SilentSpec save handler registered');
 
@@ -61,9 +68,9 @@ export function registerSaveHandler(
         return;
       }
 
-      const existing = debounceTimers.get(filePath);
-      if (existing) {
-        clearTimeout(existing);
+      const existingTimer = debounceTimers.get(filePath);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
       }
 
       log(`Save detected: ${filePath} — waiting 2s...`);
@@ -71,36 +78,44 @@ export function registerSaveHandler(
       debounceTimers.set(filePath, setTimeout(() => {
         debounceTimers.delete(filePath);
 
-        // Phase 2 — AST gate
-        const result = analyzeFile(filePath, log);
-        if (!result.isTestable) {
-          log(`Skipped: ${result.skipReason} — ${filePath}`);
-          return;
-        }
-        log(`Testable: [${result.exportedFunctions.join(', ')}] — ${filePath}`);
+        void (async () => {
+          // Phase 2 — AST gate
+          const result = analyzeFile(filePath, log);
+          if (!result.isTestable) {
+            log(`Skipped: ${result.skipReason} — ${filePath}`);
+            return;
+          }
+          log(`Testable: [${result.exportedFunctions.join(', ')}] — ${filePath}`);
 
-        // Context extraction and prompt build
-        const ctx = extractContext(
-          filePath,
-          result.exportedFunctions,
-          result.imports,
-          log
-        );
-        log(`Context ready — framework=${ctx.framework}, pattern=${ctx.testPatternSample ? 'found' : 'none'}`);
+          // Phase 3 — context extraction
+          const ctx = extractContext(
+            filePath,
+            result.exportedFunctions,
+            result.imports,
+            log
+          );
+          log(`Context ready — framework=${ctx.framework}, pattern=${ctx.testPatternSample ? 'found' : 'none'}`);
 
-        const prompt = buildPrompt(ctx);
+          // Phase 7 — resolve specPath before buildPrompt
+          // so import hints in prompt are relative to spec location
+          ctx.specPath = await resolveSpecPath(filePath);
+          log(`Spec path resolved: ${path.basename(ctx.specPath)}`);
 
-        // Phase 5 — hand off to provider via callback
-        const existing = pendingRequests.get(filePath);
-        if (existing) {
-          existing.abort();
-          pendingRequests.delete(filePath);
-        }
+          // Phase 4 — build prompt with full context including deps
+          const prompt = buildPrompt(ctx);
 
-        const controller = new AbortController();
-        pendingRequests.set(filePath, controller);
+          // Phase 5 — hand off to provider via callback
+          const existingController = pendingRequests.get(filePath);
+          if (existingController) {
+            existingController.abort();
+            pendingRequests.delete(filePath);
+          }
 
-        void onPromptReady(prompt, filePath, log, controller.signal);
+          const controller = new AbortController();
+          pendingRequests.set(filePath, controller);
+
+          await onPromptReady(prompt, filePath, log, controller.signal);
+        })();
       }, 2000));
     }
   );
