@@ -36,7 +36,10 @@ export class ClaudeProvider implements AIProvider {
     const timeout = setTimeout(() => controller.abort(), 30_000);
 
     // If external signal aborts (re-save cancellation), abort this controller too
-    abortSignal?.addEventListener('abort', () => controller.abort());
+    abortSignal?.addEventListener('abort', () => {
+      controller.abort();
+      clearTimeout(timeout);
+    });
 
     try {
       const response = await fetch(API_URL, {
