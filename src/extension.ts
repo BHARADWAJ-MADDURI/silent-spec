@@ -7,7 +7,8 @@ import { OllamaProvider } from './ai/ollamaProvider';
 import { GitHubModelsProvider } from './ai/githubModelsProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
-import { writeSpecFile } from './fileWriter';
+import { writeSpecFile, mergeSpecFile } from './fileWriter';
+import { runGapFinder } from './gapFinder';
 
 // Provider factory
 function getProvider(context: vscode.ExtensionContext): AIProvider {
@@ -22,9 +23,11 @@ function getProvider(context: vscode.ExtensionContext): AIProvider {
   if (providerName === 'claude') {
     return new ClaudeProvider(modelOverride).withSecrets(context.secrets);
   }
+
   if (providerName === 'github') {
     return new GitHubModelsProvider(modelOverride).withSecrets(context.secrets);
   }
+
   // Default — Ollama, free, no API key needed
   return new OllamaProvider(modelOverride);
 }
@@ -69,7 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(toggleCmd);
 
-  // Set API key command — handles both providers
+  // Set API key command — handles all providers
   const setKeyCmd = vscode.commands.registerCommand(
     'silentspec.setApiKey',
     async () => {
@@ -80,10 +83,10 @@ export function activate(context: vscode.ExtensionContext) {
       if (!provider) { return; }
 
       const key = await vscode.window.showInputBox({
-        prompt: `Enter your ${provider === 'claude' ? 'Anthropic' : 'OpenAI'} API key`,
+        prompt: `Enter your ${provider === 'claude' ? 'Anthropic' : provider === 'github' ? 'GitHub' : 'OpenAI'} API key`,
         password: true,
         ignoreFocusOut: true,
-        placeHolder: provider === 'claude' ? 'sk-ant-...' : 'sk-...',
+        placeHolder: provider === 'claude' ? 'sk-ant-...' : provider === 'github' ? 'ghp_...' : 'sk-...',
       });
 
       if (!key || key.trim().length === 0) { return; }
@@ -93,7 +96,7 @@ export function activate(context: vscode.ExtensionContext) {
         : provider === 'github'
         ? 'silentspec.githubToken'
         : 'silentspec.openaiApiKey';
-      
+
       const displayName = provider === 'claude'
         ? 'Claude'
         : provider === 'github'
@@ -107,6 +110,50 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(setKeyCmd);
+
+  // Gap Finder command
+  const gapFinderCmd = vscode.commands.registerCommand(
+    'silentspec.findGaps',
+    async () => {
+      await runGapFinder(
+        (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
+        async (prompt, filePath, log, abortSignal, isMerge) => {
+          processingQueue.enqueue(async () => {
+            const config = vscode.workspace.getConfiguration('silentspec');
+            const providerName = config.get<string>('provider', 'ollama');
+
+            log(`Gap Finder: calling ${providerName}...`);
+            updateStatusBar('$(sync~spin) SS: Generating...');
+
+            const provider = getProvider(context);
+            const raw = await provider.generateTests(prompt, log, abortSignal);
+
+            if (!raw) {
+              updateStatusBar('$(warning) SS: Failed');
+              return;
+            }
+
+            const validated = validateResponse(raw, log);
+            if (!validated) {
+              updateStatusBar('$(warning) SS: Failed');
+              return;
+            }
+
+            // Route: merge if spec exists, full write if new file
+            if (isMerge) {
+              await mergeSpecFile(filePath, validated, log);
+            } else {
+              await writeSpecFile(filePath, validated, log);
+            }
+
+            updateStatusBar('$(check) SS: Done');
+            setTimeout(() => updateStatusBar(), 3000);
+          });
+        }
+      );
+    }
+  );
+  context.subscriptions.push(gapFinderCmd);
 
   // Register save handler
   registerSaveHandler(context, () => isPaused, async (prompt, filePath, log, abortSignal) => {

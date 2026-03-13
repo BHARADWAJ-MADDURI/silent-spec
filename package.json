@@ -1,13 +1,14 @@
 {
   "name": "silent-spec",
-  "displayName": "silent-spec",
-  "description": "Auto-generates unit tests on file save",
+  "displayName": "SilentSpec",
+  "description": "Auto-generates unit tests on file save using AI — silent, surgical, zero friction",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.109.0"
   },
   "categories": [
-    "Other"
+    "Testing",
+    "AI"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -16,16 +17,16 @@
   "contributes": {
     "commands": [
       {
-        "command": "silent-spec.helloWorld",
-        "title": "Hello World"
+        "command": "silentspec.togglePause",
+        "title": "SilentSpec: Toggle Pause"
       },
       {
         "command": "silentspec.setApiKey",
         "title": "SilentSpec: Set API Key"
       },
       {
-        "command": "silentspec.togglePause",
-        "title": "SilentSpec: Toggle Pause"
+        "command": "silentspec.findGaps",
+        "title": "SilentSpec: Find Gaps in Current File"
       }
     ],
     "configuration": {
@@ -38,22 +39,12 @@
         },
         "silentspec.supportedExtensions": {
           "type": "array",
-          "default": [
-            ".ts",
-            ".tsx",
-            ".js",
-            ".jsx"
-          ],
+          "default": [".ts", ".tsx", ".js", ".jsx"],
           "description": "List of file extensions that SilentSpec will generate tests for"
-        },
-        "silentspec.openInSplitPanel": {
-          "type": "boolean",
-          "default": true,
-          "description": "Auto-Open generated test files in a split panel"
         },
         "silentspec.provider": {
           "type": "string",
-          "enum": ["ollama","claude", "openai", "github"],
+          "enum": ["ollama", "claude", "openai", "github"],
           "enumDescriptions": [
             "Free local generation via Ollama — no API key needed",
             "Claude (Anthropic) — best quality, requires API key",
@@ -61,13 +52,13 @@
             "GitHub Models — free tier, requires GitHub Personal Access Token"
           ],
           "default": "ollama",
-          "description": "AI provider. Use 'ollama' for free local generation. 'claude' or 'openai' require an API key and internet connection."
+          "description": "AI provider for test generation. Use 'ollama' for free local generation."
         },
         "silentspec.model": {
           "type": "string",
           "default": "",
-          "description": "Model name. Leave empty for provider default (ollama: deepseek-coder:6.7b, claude: claude-sonnet-4-20250514, openai: gpt-4o)",
-          "markdownDescription": "Leave empty to use defaults: claude-sonnet-4-20250514 (Claude) / gpt-4o (OpenAI)"
+          "description": "Model override. Leave empty for provider default.",
+          "markdownDescription": "Leave empty to use defaults: `deepseek-coder:6.7b` (Ollama) / `claude-sonnet-4-20250514` (Claude) / `gpt-4o` (OpenAI) / `gpt-4o` (GitHub Models)"
         },
         "silentspec.openSpecOnCreate": {
           "type": "boolean",
