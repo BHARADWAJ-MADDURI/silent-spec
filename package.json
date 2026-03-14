@@ -51,7 +51,7 @@
             "GPT-4o (OpenAI) — requires API key",
             "GitHub Models — free tier, requires GitHub Personal Access Token"
           ],
-          "default": "ollama",
+          "default": "github",
           "description": "AI provider for test generation. Use 'ollama' for free local generation."
         },
         "silentspec.model": {
