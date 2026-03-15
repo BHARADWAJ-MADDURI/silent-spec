@@ -10,7 +10,8 @@ import { processingQueue } from './utils/processingQueue';
 import { writeSpecFile, mergeSpecFile } from './fileWriter';
 import { runGapFinder } from './gapFinder';
 
-// Ollama auto-detect — silently use Ollama if it's already running locally
+// Ollama auto-detect — live check on every generation
+// Prevents stale cached state when user kills Ollama mid-session
 async function isOllamaRunning(): Promise<boolean> {
   try {
     const response = await fetch('http://localhost:11434/api/tags', {
@@ -57,24 +58,6 @@ export function activate(context: vscode.ExtensionContext) {
 
   let isPaused = context.workspaceState.get<boolean>('silentspec.paused', false);
 
-  // Ollama override flag — only set if Ollama is running AND user is on default provider
-  let ollamaDetected = false;
-
-  // Detect Ollama silently on startup — only override if user hasn't explicitly chosen a provider
-  void isOllamaRunning().then(running => {
-    const config = vscode.workspace.getConfiguration('silentspec');
-    const configuredProvider = config.get<string>('provider', 'github');
-
-    // Only auto-switch if user is on the default (github)
-    // Respect explicit claude/openai/ollama choices
-    if (running && configuredProvider === 'github') {
-      ollamaDetected = true;
-      outputChannel.appendLine(
-        `[${new Date().toLocaleTimeString()}] Ollama detected — using local model (overriding default)`
-      );
-    }
-  });
-
   function updateStatusBar(text?: string) {
     if (text) {
       statusBar.text = text;
@@ -90,19 +73,28 @@ export function activate(context: vscode.ExtensionContext) {
       : undefined;
   }
 
-  // Resolve active provider — Ollama takes priority if auto-detected
-  function getActiveProvider(): AIProvider {
-    if (ollamaDetected) {
-      return getProvider(context, 'ollama');
+  // Live Ollama check — called on every generation to handle mid-session kills
+  async function getActiveProvider(): Promise<AIProvider> {
+    const config = vscode.workspace.getConfiguration('silentspec');
+    const configuredProvider = config.get<string>('provider', 'github');
+    if (configuredProvider === 'github') {
+      const ollamaUp = await isOllamaRunning();
+      if (ollamaUp) {
+        return getProvider(context, 'ollama');
+      }
     }
     return getProvider(context);
   }
 
-  // Resolve active provider name for logging
-  function getActiveProviderName(): string {
-    if (ollamaDetected) { return 'ollama'; }
-    return vscode.workspace.getConfiguration('silentspec')
-      .get<string>('provider', 'github');
+  // Returns provider name string — single await, reused for logging
+  async function getActiveProviderName(): Promise<string> {
+    const config = vscode.workspace.getConfiguration('silentspec');
+    const configuredProvider = config.get<string>('provider', 'github');
+    if (configuredProvider === 'github') {
+      const ollamaUp = await isOllamaRunning();
+      if (ollamaUp) { return 'ollama'; }
+    }
+    return configuredProvider;
   }
 
   updateStatusBar();
@@ -167,10 +159,14 @@ export function activate(context: vscode.ExtensionContext) {
         (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
         async (prompt, filePath, log, abortSignal, isMerge) => {
           processingQueue.enqueue(async () => {
-            log(`Gap Finder: calling ${getActiveProviderName()}...`);
+            // Resolve provider once — reuse for both logging and generation
+            const providerName = await getActiveProviderName();
+            const provider = await getActiveProvider();
+
+            log(`Gap Finder: calling ${providerName}...`);
             updateStatusBar('$(sync~spin) SS: Generating...');
 
-            const raw = await getActiveProvider().generateTests(prompt, log, abortSignal);
+            const raw = await provider.generateTests(prompt, log, abortSignal);
 
             if (!raw) {
               updateStatusBar('$(warning) SS: Failed');
@@ -183,7 +179,6 @@ export function activate(context: vscode.ExtensionContext) {
               return;
             }
 
-            // Route: merge if spec exists, full write if new file
             if (isMerge) {
               await mergeSpecFile(filePath, validated, log);
             } else {
@@ -208,10 +203,15 @@ export function activate(context: vscode.ExtensionContext) {
   // Register save handler
   registerSaveHandler(context, () => isPaused, updateStatus, async (prompt, filePath, log, abortSignal) => {
     processingQueue.enqueue(async () => {
-      log(`Calling ${getActiveProviderName()} for ${filePath}...`);
+      // Resolve provider once — reuse for both logging and generation
+      // Live check ensures Ollama state is current even if killed mid-session
+      const providerName = await getActiveProviderName();
+      const provider = await getActiveProvider();
+
+      log(`Calling ${providerName} for ${filePath}...`);
       updateStatusBar('$(sync~spin) SS: Generating...');
 
-      const raw = await getActiveProvider().generateTests(prompt, log, abortSignal);
+      const raw = await provider.generateTests(prompt, log, abortSignal);
 
       if (!raw) {
         updateStatusBar('$(warning) SS: Failed');
