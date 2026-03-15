@@ -199,8 +199,14 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(gapFinderCmd);
 
+  function updateStatus(text: string): void {
+    if (!text) { updateStatusBar(); return; }
+    statusBar.text = text;
+    statusBar.backgroundColor = undefined;
+  }
+
   // Register save handler
-  registerSaveHandler(context, () => isPaused, async (prompt, filePath, log, abortSignal) => {
+  registerSaveHandler(context, () => isPaused, updateStatus, async (prompt, filePath, log, abortSignal) => {
     processingQueue.enqueue(async () => {
       log(`Calling ${getActiveProviderName()} for ${filePath}...`);
       updateStatusBar('$(sync~spin) SS: Generating...');

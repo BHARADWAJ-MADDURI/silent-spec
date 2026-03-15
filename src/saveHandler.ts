@@ -42,6 +42,7 @@ const pendingRequests = new Map<string, AbortController>();
 export function registerSaveHandler(
   context: vscode.ExtensionContext,
   isPausedFn: () => boolean,
+  updateStatus: (text: string) => void,
   onPromptReady: (
     prompt: string,
     filePath: string,
@@ -83,6 +84,8 @@ export function registerSaveHandler(
           const result = analyzeFile(filePath, log);
           if (!result.isTestable) {
             log(`Skipped: ${result.skipReason} — ${filePath}`);
+            updateStatus(`$(info) SS: Skipped — ${result.skipReason}`);
+            setTimeout(() => updateStatus(''), 3000);
             return;
           }
           log(`Testable: [${result.exportedFunctions.join(', ')}] — ${filePath}`);
