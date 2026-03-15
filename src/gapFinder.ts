@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import { analyzeFile } from './astAnalyzer';
 import { extractContext } from './contextExtractor';
 import { buildPrompt } from './promptBuilder';
-import { resolveSpecPath, mergeSpecFile, writeSpecFile } from './fileWriter';
-import { detectTestedFunctions } from './testScanner';
+import { resolveSpecPath } from './fileWriter';
+import { detectTestedFunctions } from './utils/testScanner';
 
 function buildGapPrompt(
   filePath: string,
