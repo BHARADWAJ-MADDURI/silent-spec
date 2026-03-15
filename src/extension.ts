@@ -107,8 +107,8 @@ function fixImportStatement(
 
   // Replace any existing import from the source file — handles all variations
   const importRegex = new RegExp(
-    `import\\s+(?:[\\w\\s{},*]+)\\s+from\\s+['"]${relativePath.replace('.', '\\.')}['"];?`,
-    'g'
+    `import\\s+[\\s\\S]*?\\s+from\\s+['"]${relativePath.replace('.', '\\.')}['"];?`,
+    'gm'
   );
 
   if (importRegex.test(validated)) {
@@ -285,7 +285,7 @@ export function activate(context: vscode.ExtensionContext) {
     async () => {
       await runGapFinder(
         (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
-        async (prompt, filePath, log, abortSignal, isMerge) => {
+        async (prompt, filePath, log, abortSignal, isMerge, exportedFunctions, exportTypes) => {
           processingQueue.enqueue(async () => {
             const providerName = await getActiveProviderName();
             lastUsedProvider = providerName;
@@ -320,13 +320,27 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
               }
 
-              if (isMerge) {
-                await mergeSpecFile(filePath, validated, log);
-              } else {
-                await writeSpecFile(filePath, validated, log);
+              // Phase 10 — fix import statement using AST export type data
+              const specPath = await resolveSpecPath(filePath);
+              const fixedValidated = fixImportStatement(
+                validated,
+                filePath,
+                specPath,
+                exportedFunctions,
+                exportTypes
+              );
+
+              if (fixedValidated !== validated) {
+                log('Gap Finder: import statement corrected — default/named export mismatch fixed');
               }
 
-              const fnCount = (validated.match(/describe\(/g) || []).length;
+              if (isMerge) {
+                await mergeSpecFile(filePath, fixedValidated, log);
+              } else {
+                await writeSpecFile(filePath, fixedValidated, log);
+              }
+
+              const fnCount = (fixedValidated.match(/describe\(/g) || []).length;
               telemetry.recordSuccess(providerName, fnCount);
 
               updateStatusBar('$(check) SS: Done');
@@ -407,11 +421,11 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Extract covered function names from describe blocks for header
         const coveredFunctions = (
-          validated.match(/describe\(['"`]([^'"`]+)['"`]/g) || []
+          fixedValidated.match(/describe\(['"`]([^'"`]+)['"`]/g) || []
         ).map(m => m.replace(/describe\(['"`]/, '').replace(/['"`]$/, ''));
 
         log(`Response validated — writing spec file for ${filePath}`);
-        await writeSpecFile(filePath, validated, log, coveredFunctions);
+        await writeSpecFile(filePath, fixedValidated, log, coveredFunctions);
 
         // Telemetry
         telemetry.recordSuccess(providerName, coveredFunctions.length);
