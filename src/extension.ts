@@ -77,6 +77,51 @@ function getProvider(
   return new OllamaProvider(modelOverride);
 }
 
+// post-processing: correct import statement using AST export type data
+// Fixes AI hallucination where default exports are imported as named exports
+function fixImportStatement(
+  validated: string,
+  filePath: string,
+  specPath: string,
+  exportedFunctions: string[],
+  exportTypes: Record<string, 'default' | 'named'>
+): string {
+  const sourceBaseName = path.basename(filePath, path.extname(filePath));
+  const specDir = path.dirname(specPath);
+  const sourceDir = path.dirname(filePath);
+
+  let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName));
+  if (!relativePath.startsWith('.')) { relativePath = './' + relativePath; }
+
+  const defaultExport = exportedFunctions.find(f => exportTypes[f] === 'default');
+  const namedExports = exportedFunctions.filter(f => exportTypes[f] === 'named');
+
+  let correctImport: string;
+  if (defaultExport && namedExports.length > 0) {
+    correctImport = `import ${defaultExport}, { ${namedExports.join(', ')} } from '${relativePath}';`;
+  } else if (defaultExport) {
+    correctImport = `import ${defaultExport} from '${relativePath}';`;
+  } else {
+    correctImport = `import { ${namedExports.join(', ')} } from '${relativePath}';`;
+  }
+
+  // Replace any existing import from the source file — handles all variations
+  const importRegex = new RegExp(
+    `import\\s+(?:[\\w\\s{},*]+)\\s+from\\s+['"]${relativePath.replace('.', '\\.')}['"];?`,
+    'g'
+  );
+
+  if (importRegex.test(validated)) {
+    return validated.replace(importRegex, correctImport);
+  }
+
+  // If no matching import found, inject after SS-GENERATED-START marker
+  return validated.replace(
+    '// <SS-GENERATED-START>',
+    `// <SS-GENERATED-START>\n${correctImport}`
+  );
+}
+
 export function activate(context: vscode.ExtensionContext) {
 
   // Telemetry — local only, never transmitted
@@ -297,7 +342,14 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(gapFinderCmd);
 
   // Register save handler
-  registerSaveHandler(context, () => isPaused, updateStatus, async (prompt, filePath, log, abortSignal) => {
+  registerSaveHandler(context, () => isPaused, updateStatus, async (
+    prompt, 
+    filePath, 
+    log, 
+    abortSignal,
+    exportedFunctions,
+    exportTypes  
+  ) => {
     processingQueue.enqueue(async () => {
       const providerName = await getActiveProviderName();
       lastUsedProvider = providerName;
@@ -337,6 +389,20 @@ export function activate(context: vscode.ExtensionContext) {
         if (validated.includes('// [SS-PARTIAL]')) {
           log(`Warning: partial generation — token limit reached for ${filePath}`);
           updateStatusBar('$(warning) SS: Partial');
+        }
+
+        // fix import statement using AST export type data
+        const specPath = await resolveSpecPath(filePath);
+        const fixedValidated = fixImportStatement(
+          validated,
+          filePath,
+          specPath,
+          exportedFunctions,
+          exportTypes
+        );
+
+        if (fixedValidated !== validated) {
+          log('Import statement corrected — default/named export mismatch fixed');
         }
 
         // Extract covered function names from describe blocks for header

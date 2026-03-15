@@ -9,6 +9,7 @@ function buildGapPrompt(
   filePath: string,
   gaps: string[],
   testedFunctions: string[],
+  exportTypes: Record<string, 'default' | 'named'>,
   log: (msg: string) => void
 ): string {
   const result = analyzeFile(filePath, log);
@@ -18,14 +19,14 @@ function buildGapPrompt(
 
   const ctx = extractContext(
     filePath,
-    gaps,            // only gap functions — not all exports
+    gaps,
     result.imports,
-    log
+    log,
+    exportTypes 
   );
 
   const basePrompt = buildPrompt(ctx);
 
-  // Inject already-tested section after base prompt
   const alreadyTestedNote = testedFunctions.length > 0
     ? [
       '## Already Tested — Do Not Regenerate',
@@ -49,7 +50,9 @@ export async function runGapFinder(
     filePath: string,
     log: (msg: string) => void,
     abortSignal: AbortSignal,
-    isMerge: boolean
+    isMerge: boolean,
+    exportedFunctions: string[],                       
+    exportTypes: Record<string, 'default' | 'named'>   
   ) => Promise<void>
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -88,7 +91,6 @@ export async function runGapFinder(
     let testedFunctions: string[] = [];
     let isMerge = false;
 
-    // Read and scan spec if it exists
     try {
       const specBytes = await vscode.workspace.fs.readFile(
         vscode.Uri.file(specPath)
@@ -104,13 +106,12 @@ export async function runGapFinder(
       gaps = result.exportedFunctions.filter(
         fn => !testedFunctions.includes(fn)
       );
-      isMerge = true; // spec exists — use merge mode
+      isMerge = true;
 
     } catch {
       log('Gap Finder: no spec found — full generation');
     }
 
-    // No gaps found
     if (gaps.length === 0) {
       vscode.window.showInformationMessage(
         'SilentSpec: No gaps found — all exports have tests ✓'
@@ -120,7 +121,6 @@ export async function runGapFinder(
 
     log(`Gap Finder: gaps — [${gaps.join(', ')}]`);
 
-    // Toast: names if <=3, count if >3
     const gapDisplay = gaps.length <= 3
       ? gaps.join(', ')
       : `${gaps.length} functions`;
@@ -128,10 +128,15 @@ export async function runGapFinder(
       `SilentSpec: Generating tests for ${gapDisplay}...`
     );
 
-    // Build gap-targeted prompt
     let prompt: string;
     try {
-      prompt = buildGapPrompt(filePath, gaps, testedFunctions, log);
+      prompt = buildGapPrompt(
+        filePath,
+        gaps,
+        testedFunctions,
+        result.exportTypes,   
+        log
+      );
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       log(`Gap Finder: prompt build failed — ${msg}`);
@@ -140,6 +145,14 @@ export async function runGapFinder(
     }
 
     const controller = new AbortController();
-    await onPromptReady(prompt, filePath, log, controller.signal, isMerge);
+    await onPromptReady(
+      prompt,
+      filePath,
+      log,
+      controller.signal,
+      isMerge,
+      result.exportedFunctions,  
+      result.exportTypes       
+    );
   });
 }

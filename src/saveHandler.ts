@@ -48,7 +48,9 @@ export function registerSaveHandler(
     prompt: string,
     filePath: string,
     log: (msg: string) => void,
-    abortSignal: AbortSignal
+    abortSignal: AbortSignal,
+    exportedFunctions: string[],   
+    exportTypes: Record<string, 'default' | 'named'> 
   ) => Promise<void>
 ): void {
   log('SilentSpec save handler registered');
@@ -127,7 +129,14 @@ export function registerSaveHandler(
           const controller = new AbortController();
           pendingRequests.set(filePath, controller);
 
-          await onPromptReady(prompt, filePath, log, controller.signal);
+          await onPromptReady(
+            prompt, 
+            filePath, 
+            log, 
+            controller.signal, 
+            result.exportedFunctions,
+            result.exportTypes     
+          );
         })();
       }, 2000));
     }
