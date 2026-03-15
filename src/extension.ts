@@ -92,36 +92,38 @@ function fixImportStatement(
 
   let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName));
   if (!relativePath.startsWith('.')) { relativePath = './' + relativePath; }
-
+  
   const defaultExport = exportedFunctions.find(f => exportTypes[f] === 'default');
   const namedExports = exportedFunctions.filter(f => exportTypes[f] === 'named');
 
+  // BUILD THE CORRECT LINE
   let correctImport: string;
-  if (defaultExport && namedExports.length > 0) {
-    correctImport = `import ${defaultExport}, { ${namedExports.join(', ')} } from '${relativePath}';`;
+  const namedPart = namedExports.length > 0 ? `{ ${namedExports.join(', ')} }` : '';
+  
+  if (defaultExport && namedPart) {
+    correctImport = `import ${defaultExport}, ${namedPart} from '${relativePath}';`;
   } else if (defaultExport) {
     correctImport = `import ${defaultExport} from '${relativePath}';`;
   } else {
-    correctImport = `import { ${namedExports.join(', ')} } from '${relativePath}';`;
+    correctImport = `import ${namedPart} from '${relativePath}';`;
   }
 
-  // Replace any existing import from the source file — handles all variations
-  const importRegex = new RegExp(
-    `import\\s+[\\s\\S]*?\\s+from\\s+['"]${relativePath.replace('.', '\\.')}['"];?`,
-    'gm'
-  );
+  // NUCLEAR REGEX: Matches any import line that ends with your filename
+  // This is much safer than matching the full relative path string
+  const filenameNoExt = sourceBaseName.replace(/\.[tj]sx?$/, '');
+  const nuclearRegex = new RegExp(`import\\s+[\\s\\S]*?\\s+from\\s+['"].*${filenameNoExt}['"];?`, 'g');
 
-  if (importRegex.test(validated)) {
-    return validated.replace(importRegex, correctImport);
+  if (nuclearRegex.test(validated)) {
+    console.log(`[SilentSpec] SUCCESS: Corrected import for ${filenameNoExt}`);
+    return validated.replace(nuclearRegex, correctImport);
   }
 
-  // If no matching import found, inject after SS-GENERATED-START marker
+  console.log(`[SilentSpec] WARNING: No import found for ${filenameNoExt}, injecting at top`);
   return validated.replace(
     '// <SS-GENERATED-START>',
     `// <SS-GENERATED-START>\n${correctImport}`
   );
 }
-
 export function activate(context: vscode.ExtensionContext) {
 
   // Telemetry — local only, never transmitted
