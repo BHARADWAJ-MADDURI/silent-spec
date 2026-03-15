@@ -104,7 +104,8 @@ export function registerSaveHandler(
             filePath,
             result.exportedFunctions,
             result.imports,
-            log
+            log,
+            result.exportTypes
           );
           log(`Context ready — framework=${ctx.framework}, pattern=${ctx.testPatternSample ? 'found' : 'none'}`);
 

@@ -5,6 +5,7 @@ import * as path from 'path';
 export interface ASTAnalysisResult {
   isTestable: boolean;
   exportedFunctions: string[];
+  exportTypes: Record<string, 'default' | 'named'>; // Phase 10 — track export type
   imports: ImportInfo[];
   skipReason?: string;
 }
@@ -29,17 +30,15 @@ function parseFile(fileContent: string) {
   }
 }
 
-function extractExportedFunctions(ast: any, filePath: string): string[] {
+function extractExportedFunctions(
+  ast: any,
+  filePath: string
+): { functions: string[]; exportTypes: Record<string, 'default' | 'named'> } {
   const exported = new Set<string>();
+  const exportTypes: Record<string, 'default' | 'named'> = {};
   const fileName = path.basename(filePath, path.extname(filePath));
 
   for (const node of ast.body) {
-    // Type-only exports (TSInterfaceDeclaration, TSTypeAliasDeclaration)
-    // intentionally ignored — not testable
-
-    // Barrel re-exports (ExportAllDeclaration: export * from './utils')
-    // intentionally ignored — no direct logic to test
-
     // Named exports
     if (node.type === 'ExportNamedDeclaration') {
       if (node.declaration) {
@@ -47,23 +46,24 @@ function extractExportedFunctions(ast: any, filePath: string): string[] {
 
         if (decl.type === 'FunctionDeclaration' && decl.id?.name) {
           exported.add(decl.id.name);
+          exportTypes[decl.id.name] = 'named';
         }
 
         if (decl.type === 'ClassDeclaration' && decl.id?.name) {
           exported.add(decl.id.name);
+          exportTypes[decl.id.name] = 'named';
         }
 
         if (decl.type === 'VariableDeclaration') {
           for (const declarator of decl.declarations) {
-            if (declarator.id.type !== 'Identifier') {
-              continue;
-            }
+            if (declarator.id.type !== 'Identifier') { continue; }
             const init = declarator.init;
             if (
               init?.type === 'ArrowFunctionExpression' ||
               init?.type === 'FunctionExpression'
             ) {
               exported.add(declarator.id.name);
+              exportTypes[declarator.id.name] = 'named';
             }
           }
         }
@@ -74,6 +74,7 @@ function extractExportedFunctions(ast: any, filePath: string): string[] {
         for (const specifier of node.specifiers) {
           if (specifier.exported?.name) {
             exported.add(specifier.exported.name);
+            exportTypes[specifier.exported.name] = 'named';
           }
         }
       }
@@ -84,19 +85,24 @@ function extractExportedFunctions(ast: any, filePath: string): string[] {
       const decl = node.declaration;
 
       if (decl.type === 'FunctionDeclaration') {
-        exported.add(decl.id?.name ?? fileName);
+        const name = decl.id?.name ?? fileName;
+        exported.add(name);
+        exportTypes[name] = 'default';
       } else if (decl.type === 'ClassDeclaration') {
-        exported.add(decl.id?.name ?? fileName);
+        const name = decl.id?.name ?? fileName;
+        exported.add(name);
+        exportTypes[name] = 'default';
       } else if (
         decl.type === 'ArrowFunctionExpression' ||
         decl.type === 'FunctionExpression'
       ) {
         exported.add(fileName);
+        exportTypes[fileName] = 'default';
       }
     }
   }
 
-  return [...exported];
+  return { functions: [...exported], exportTypes };
 }
 
 function extractImports(ast: any, filePath: string): ImportInfo[] {
@@ -104,9 +110,7 @@ function extractImports(ast: any, filePath: string): ImportInfo[] {
   const fileDir = path.dirname(filePath);
 
   for (const node of ast.body) {
-    if (node.type !== 'ImportDeclaration') {
-      continue;
-    }
+    if (node.type !== 'ImportDeclaration') { continue; }
     const source = node.source.value as string;
     const isLocal = source.startsWith('./') || source.startsWith('../');
 
@@ -140,22 +144,36 @@ export function analyzeFile(
   try {
     fileContent = fs.readFileSync(filePath, 'utf8');
   } catch {
-    return { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'cannot read file' };
+    return {
+      isTestable: false,
+      exportedFunctions: [],
+      exportTypes: {},
+      imports: [],
+      skipReason: 'cannot read file'
+    };
   }
 
   const ast = parseFile(fileContent);
   if (!ast) {
-    return { isTestable: false, exportedFunctions: [], imports: [], skipReason: 'syntax error' };
+    return {
+      isTestable: false,
+      exportedFunctions: [],
+      exportTypes: {},
+      imports: [],
+      skipReason: 'syntax error'
+    };
   }
 
-  const exportedFunctions = extractExportedFunctions(ast, filePath);
+  const { functions: exportedFunctions, exportTypes } =
+    extractExportedFunctions(ast, filePath);
 
   // Phase 7 — fallback for unexported functions
-  // Handles files with no exports: module.exports, internal helpers, etc.
+  const fallbackFunctions: string[] = [];
   if (exportedFunctions.length === 0) {
     for (const node of ast.body) {
       if (node.type === 'FunctionDeclaration' && node.id?.name) {
-        exportedFunctions.push(node.id.name);
+        fallbackFunctions.push(node.id.name);
+        exportTypes[node.id.name] = 'named'; // fallback = treat as named
       }
       if (node.type === 'VariableDeclaration') {
         for (const declarator of node.declarations) {
@@ -164,22 +182,24 @@ export function analyzeFile(
             (declarator.init?.type === 'ArrowFunctionExpression' ||
              declarator.init?.type === 'FunctionExpression')
           ) {
-            exportedFunctions.push(declarator.id.name);
+            fallbackFunctions.push(declarator.id.name);
+            exportTypes[declarator.id.name] = 'named';
           }
         }
       }
     }
 
-    if (exportedFunctions.length > 0) {
-      log?.(`No exports found — falling back to ${exportedFunctions.length} top-level function(s)`);
+    if (fallbackFunctions.length > 0) {
+      log?.(`No exports found — falling back to ${fallbackFunctions.length} top-level function(s)`);
+      exportedFunctions.push(...fallbackFunctions);
     }
   }
 
-  // Skip only if truly no functions found at all — not just no exports
   if (exportedFunctions.length === 0) {
     return {
       isTestable: false,
       exportedFunctions: [],
+      exportTypes: {},
       imports: [],
       skipReason: 'no testable functions found',
     };
@@ -191,5 +211,5 @@ export function analyzeFile(
     log?.(`Warning: unresolvable import ${brokenImport.source} — may use path aliases, continuing...`);
   }
 
-  return { isTestable: true, exportedFunctions, imports };
+  return { isTestable: true, exportedFunctions, exportTypes, imports };
 }

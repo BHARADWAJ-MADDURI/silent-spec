@@ -11,6 +11,7 @@ export interface SilentSpecContext {
   fileContent: string;
   filePath: string;
   exportedFunctions: string[];
+  exportTypes: Record<string, 'default' | 'named'>; // Phase 10 — added
   framework: TestFramework;
   testPatternSample: string | null;
   mockHints: MockHint[];
@@ -56,10 +57,7 @@ export function findNearestTestFile(filePath: string): string | null {
   while (dir.startsWith(workspaceRoot)) {
     try {
       const entries = fs.readdirSync(dir);
-
-      const testFile = entries.find(f =>
-        /\.(test|spec)\.[tj]sx?$/.test(f)
-      );
+      const testFile = entries.find(f => /\.(test|spec)\.[tj]sx?$/.test(f));
       if (testFile) { return path.join(dir, testFile); }
 
       const testDirs = ['__tests__', 'tests', 'test'];
@@ -68,9 +66,7 @@ export function findNearestTestFile(filePath: string): string | null {
         if (fs.existsSync(testDirPath)) {
           try {
             const dirEntries = fs.readdirSync(testDirPath);
-            const dirTestFile = dirEntries.find(f =>
-              /\.[tj]sx?$/.test(f)
-            );
+            const dirTestFile = dirEntries.find(f => /\.[tj]sx?$/.test(f));
             if (dirTestFile) { return path.join(testDirPath, dirTestFile); }
           } catch { /* skip unreadable test directory */ }
         }
@@ -171,17 +167,13 @@ function detectProjectType(
     imports.some(i => frontendImports.includes(i.source));
 
   const isNestJS = imports.some(i => i.source.startsWith('@nestjs/'));
-
-  const isNextJS = imports.some(i =>
-    i.source === 'next' || i.source.startsWith('next/')
-  );
+  const isNextJS = imports.some(i => i.source === 'next' || i.source.startsWith('next/'));
 
   const graphqlPackages = [
     'graphql', '@apollo/client', '@apollo/server',
     'graphql-request', 'urql', 'relay-runtime', 'type-graphql'
   ];
   const isGraphQL = imports.some(i => graphqlPackages.includes(i.source));
-
   const isPrisma = imports.some(i =>
     i.source === '@prisma/client' || i.source.includes('prisma')
   );
@@ -193,7 +185,8 @@ export function extractContext(
   filePath: string,
   exportedFunctions: string[],
   imports: ImportInfo[],
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  exportTypes: Record<string, 'default' | 'named'> = {} // Phase 10 — added
 ): SilentSpecContext {
 
   const workspaceRoot = getWorkspaceRoot() ?? path.dirname(filePath);
@@ -215,15 +208,12 @@ export function extractContext(
   log(`Project type: ${projectFlags}`);
 
   const nearestTest = findNearestTestFile(filePath);
-  const testPatternSample = nearestTest
-    ? extractTestPattern(nearestTest)
-    : null;
+  const testPatternSample = nearestTest ? extractTestPattern(nearestTest) : null;
   log(`Test pattern: ${testPatternSample ? 'found' : 'none'}`);
 
   const mockHints = buildMockHints(imports, framework);
   log(`Mock hints: ${mockHints.length} dependencies`);
 
-  // Phase 7 — collect dependency signatures for local imports
   const dependencyContext = collectDependencyContext(imports, log);
   if (dependencyContext.length > 0) {
     log(`Dependencies resolved: ${dependencyContext.length}`);
@@ -233,6 +223,7 @@ export function extractContext(
     fileContent,
     filePath,
     exportedFunctions,
+    exportTypes,       // Phase 10 — passed through
     framework,
     testPatternSample,
     mockHints,
@@ -241,6 +232,6 @@ export function extractContext(
     isNextJS,
     isGraphQL,
     isPrisma,
-    dependencyContext, // Phase 7
+    dependencyContext,
   };
 }
