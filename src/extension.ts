@@ -88,6 +88,9 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar.command = 'silentspec.togglePause';
 
   let isPaused = context.workspaceState.get<boolean>('silentspec.paused', false);
+  let lastUsedProvider = vscode.workspace
+  .getConfiguration('silentspec')
+  .get<string>('provider', 'github');
 
   function updateStatusBar(text?: string) {
     if (text) {
@@ -95,10 +98,12 @@ export function activate(context: vscode.ExtensionContext) {
       statusBar.backgroundColor = undefined;
       return;
     }
-    statusBar.text = isPaused ? '$(debug-pause) SS: Paused' : '$(zap) SS: On';
+    statusBar.text = isPaused 
+      ? '$(debug-pause) SS: Paused' 
+      : `$(zap) SS: On (${lastUsedProvider})`;
     statusBar.tooltip = isPaused
       ? 'SilentSpec paused — click to resume'
-      : 'SilentSpec active — click to pause';
+      : `SilentSpec active — using ${lastUsedProvider}. Click to pause.`;
     statusBar.backgroundColor = isPaused
       ? new vscode.ThemeColor('statusBarItem.warningBackground')
       : undefined;
@@ -238,6 +243,7 @@ export function activate(context: vscode.ExtensionContext) {
         async (prompt, filePath, log, abortSignal, isMerge) => {
           processingQueue.enqueue(async () => {
             const providerName = await getActiveProviderName();
+            lastUsedProvider = providerName;
             const provider = await getActiveProvider();
 
             const canProceed = await checkCostAcknowledgement(context, providerName);
@@ -294,6 +300,7 @@ export function activate(context: vscode.ExtensionContext) {
   registerSaveHandler(context, () => isPaused, updateStatus, async (prompt, filePath, log, abortSignal) => {
     processingQueue.enqueue(async () => {
       const providerName = await getActiveProviderName();
+      lastUsedProvider = providerName;
       const provider = await getActiveProvider();
 
       const canProceed = await checkCostAcknowledgement(context, providerName);
