@@ -10,6 +10,7 @@ import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
 import { writeSpecFile, mergeSpecFile, resolveSpecPath } from './fileWriter';
 import { runGapFinder } from './gapFinder';
+import { TelemetryService } from './telemetry';
 
 // Module-level — track active controllers for clean abort on deactivate
 const activeControllers = new Set<AbortController>();
@@ -73,11 +74,13 @@ function getProvider(
   if (providerName === 'github') {
     return new GitHubModelsProvider(modelOverride).withSecrets(context.secrets);
   }
-
   return new OllamaProvider(modelOverride);
 }
 
 export function activate(context: vscode.ExtensionContext) {
+
+  // Telemetry — local only, never transmitted
+  const telemetry = new TelemetryService(context);
 
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right, 100
@@ -104,6 +107,7 @@ export function activate(context: vscode.ExtensionContext) {
   function updateStatus(text: string): void {
     if (!text) { updateStatusBar(); return; }
     statusBar.text = text;
+    statusBar.tooltip = 'SilentSpec only generates tests for exported functions. Add export keyword to enable generation.';
     statusBar.backgroundColor = undefined;
   }
 
@@ -178,12 +182,52 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(setKeyCmd);
 
-  // Open output log command — Phase 9
+  // Open output log
   const openLogCmd = vscode.commands.registerCommand(
     'silentspec.openLog',
     () => outputChannel.show()
   );
   context.subscriptions.push(openLogCmd);
+
+  // Show impact stats
+  const statsCmd = vscode.commands.registerCommand(
+    'silentspec.showStats',
+    () => {
+      const stats = telemetry.getStats();
+      const lastDate = stats.lastGeneratedAt === 'none'
+        ? 'never'
+        : new Date(stats.lastGeneratedAt).toLocaleDateString();
+      vscode.window.showInformationMessage(
+        `SilentSpec Impact Report\n` +
+        `Total Generations: ${stats.totalGenerations}\n` +
+        `Success / Fail: ${stats.successfulGenerations} / ${stats.failedGenerations}\n` +
+        `Functions Covered: ${stats.functionsCovered}\n` +
+        `Estimated Time Saved: ${stats.estimatedHoursSaved} hours\n` +
+        `Last Provider: ${stats.lastProvider} (${lastDate})`,
+        { modal: true },
+        'OK'
+      );
+    }
+  );
+  context.subscriptions.push(statsCmd);
+
+  // Manual generate — triggers full generation via save pipeline
+  const generateNowCmd = vscode.commands.registerCommand(
+    'silentspec.generateNow',
+    async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showWarningMessage('SilentSpec: No active file open');
+        return;
+      }
+      if (/\.(test|spec)\.[tj]sx?$/.test(editor.document.uri.fsPath)) {
+        vscode.window.showWarningMessage('SilentSpec: Cannot generate tests for a test file');
+        return;
+      }
+      await vscode.workspace.save(editor.document.uri);
+    }
+  );
+  context.subscriptions.push(generateNowCmd);
 
   // Gap Finder command
   const gapFinderCmd = vscode.commands.registerCommand(
@@ -212,16 +256,27 @@ export function activate(context: vscode.ExtensionContext) {
             try {
               const raw = await provider.generateTests(prompt, log, controller.signal);
 
-              if (!raw) { updateStatusBar('$(warning) SS: Failed'); return; }
+              if (!raw) {
+                telemetry.recordFailure(providerName);
+                updateStatusBar('$(warning) SS: Failed');
+                return;
+              }
 
               const validated = validateResponse(raw, log);
-              if (!validated) { updateStatusBar('$(warning) SS: Failed'); return; }
+              if (!validated) {
+                telemetry.recordFailure(providerName);
+                updateStatusBar('$(warning) SS: Failed');
+                return;
+              }
 
               if (isMerge) {
                 await mergeSpecFile(filePath, validated, log);
               } else {
                 await writeSpecFile(filePath, validated, log);
               }
+
+              const fnCount = (validated.match(/describe\(/g) || []).length;
+              telemetry.recordSuccess(providerName, fnCount);
 
               updateStatusBar('$(check) SS: Done');
               setTimeout(() => updateStatusBar(), 3000);
@@ -259,26 +314,39 @@ export function activate(context: vscode.ExtensionContext) {
       try {
         const raw = await provider.generateTests(prompt, log, controller.signal);
 
-        if (!raw) { updateStatusBar('$(warning) SS: Failed'); return; }
+        if (!raw) {
+          telemetry.recordFailure(providerName);
+          updateStatusBar('$(warning) SS: Failed');
+          return;
+        }
 
         const validated = validateResponse(raw, log);
-        if (!validated) { updateStatusBar('$(warning) SS: Failed'); return; }
+        if (!validated) {
+          telemetry.recordFailure(providerName);
+          updateStatusBar('$(warning) SS: Failed');
+          return;
+        }
 
         if (validated.includes('// [SS-PARTIAL]')) {
           log(`Warning: partial generation — token limit reached for ${filePath}`);
           updateStatusBar('$(warning) SS: Partial');
         }
 
-        // Extract exported functions from validated output for header
-        // Count describe blocks as proxy — each describe = one function covered
-        const coveredFunctions = (validated.match(/describe\(['"`]([^'"`]+)['"`]/g) || [])
-          .map(m => m.replace(/describe\(['"`]/, '').replace(/['"`]$/, ''));
+        // Extract covered function names from describe blocks for header
+        const coveredFunctions = (
+          validated.match(/describe\(['"`]([^'"`]+)['"`]/g) || []
+        ).map(m => m.replace(/describe\(['"`]/, '').replace(/['"`]$/, ''));
 
         log(`Response validated — writing spec file for ${filePath}`);
         await writeSpecFile(filePath, validated, log, coveredFunctions);
 
-        // Phase 9 — first-run success notification shown once ever
-        const firstSuccess = context.globalState.get<boolean>('silentspec.firstSuccessShown', false);
+        // Telemetry
+        telemetry.recordSuccess(providerName, coveredFunctions.length);
+
+        // First-run success notification — shown once ever
+        const firstSuccess = context.globalState.get<boolean>(
+          'silentspec.firstSuccessShown', false
+        );
         if (!firstSuccess) {
           await context.globalState.update('silentspec.firstSuccessShown', true);
           void vscode.window.showInformationMessage(

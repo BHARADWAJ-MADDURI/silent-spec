@@ -28,9 +28,13 @@
         "command": "silentspec.findGaps",
         "title": "SilentSpec: Find Gaps in Current File"
       },
-      { 
-        "command": "silentspec.openLog", 
-        "title": "SilentSpec: Open Output Log" 
+      {
+        "command": "silentspec.openLog",
+        "title": "SilentSpec: Open Output Log"
+      },
+      {
+        "command": "silentspec.generateNow",
+        "title": "SilentSpec: Generate Tests for Current File"
       }
     ],
     "configuration": {
