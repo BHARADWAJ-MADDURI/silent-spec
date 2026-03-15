@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
- 
+
 const DEFAULT_MODEL = 'gpt-4o';
 const API_URL = 'https://api.openai.com/v1/chat/completions';
  
@@ -29,7 +29,20 @@ export class OpenAIProvider implements AIProvider {
     const apiKey = await this.secrets.get('silentspec.openaiApiKey');
  
     if (!apiKey) {
-      log('Error: OpenAI API key not set — run SilentSpec: Set API Key');
+      log('Error: OpenAI API key not set — showing setup guidance');
+        void vscode.window.showInformationMessage(
+          'SilentSpec: OpenAI API key not set.',
+          'Set Up Key',
+          'Open OpenAI Dashboard'
+        ).then(action => {
+          if (action === 'Set Up Key') {
+            void vscode.commands.executeCommand('silentspec.setApiKey');
+          } else if (action === 'Open OpenAI Dashboard') {
+            void vscode.env.openExternal(
+              vscode.Uri.parse('https://platform.openai.com/api-keys')
+            );
+          }
+        });
       return null;
     }
 
@@ -64,7 +77,24 @@ export class OpenAIProvider implements AIProvider {
       clearTimeout(timeout);
  
       if (!response.ok) {
-        log(`Error: OpenAI API returned ${response.status} ${response.statusText}`);
+        const errorBody = await response.text();
+
+        // Handle expired or revoked token — clear key and prompt re-setup
+        if (response.status === 401) {
+          log('Error: API key rejected (401) — key may be expired or revoked');
+          await this.secrets.delete('silentspec.openaiApiKey'); // use correct key per provider
+          void vscode.window.showWarningMessage(
+            'SilentSpec: Your API key was rejected. It may have expired or been revoked.',
+            'Set Up New Key'
+          ).then(action => {
+            if (action === 'Set Up New Key') {
+              void vscode.commands.executeCommand('silentspec.setApiKey');
+            }
+          });
+          return null;
+        }
+
+        log(`Error: API returned ${response.status} — ${errorBody}`);
         return null;
       }
  

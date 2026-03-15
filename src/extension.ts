@@ -10,8 +10,13 @@ import { processingQueue } from './utils/processingQueue';
 import { writeSpecFile, mergeSpecFile } from './fileWriter';
 import { runGapFinder } from './gapFinder';
 
+// Module-level — track active controllers for clean abort on deactivate
+const activeControllers = new Set<AbortController>();
+
+// Race guard — prevents duplicate cost warnings on simultaneous saves
+let costCheckInProgress = false;
+
 // Ollama auto-detect — live check on every generation
-// Prevents stale cached state when user kills Ollama mid-session
 async function isOllamaRunning(): Promise<boolean> {
   try {
     const response = await fetch('http://localhost:11434/api/tags', {
@@ -21,6 +26,35 @@ async function isOllamaRunning(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// One-time cost acknowledgement for paid providers
+async function checkCostAcknowledgement(
+  context: vscode.ExtensionContext,
+  providerName: string
+): Promise<boolean> {
+  // Free providers — no warning needed
+  if (providerName !== 'claude' && providerName !== 'openai') { return true; }
+
+  // Race guard — prevents multiple popups on simultaneous saves
+  if (costCheckInProgress) { return false; }
+
+  const key = `silentspec.${providerName}.costAcknowledged`;
+  const acknowledged = context.globalState.get<boolean>(key, false);
+  if (acknowledged) { return true; }
+
+  costCheckInProgress = true;
+  const action = await vscode.window.showWarningMessage(
+    `SilentSpec will use your ${providerName === 'claude' ? 'Claude (Anthropic)' : 'OpenAI'} API key. ` +
+    'Your API provider may charge per request. Typical cost is ~$0.003 per generation.',
+    'I understand — continue',
+    'Cancel'
+  );
+  costCheckInProgress = false;
+
+  if (action !== 'I understand — continue') { return false; }
+  await context.globalState.update(key, true);
+  return true;
 }
 
 // Provider factory
@@ -35,11 +69,9 @@ function getProvider(
   if (providerName === 'openai') {
     return new OpenAIProvider(modelOverride).withSecrets(context.secrets);
   }
-
   if (providerName === 'claude') {
     return new ClaudeProvider(modelOverride).withSecrets(context.secrets);
   }
-
   if (providerName === 'github') {
     return new GitHubModelsProvider(modelOverride).withSecrets(context.secrets);
   }
@@ -73,6 +105,13 @@ export function activate(context: vscode.ExtensionContext) {
       : undefined;
   }
 
+  // updateStatus — passed to saveHandler for skip reason display
+  function updateStatus(text: string): void {
+    if (!text) { updateStatusBar(); return; }
+    statusBar.text = text;
+    statusBar.backgroundColor = undefined;
+  }
+
   // Live Ollama check — called on every generation to handle mid-session kills
   async function getActiveProvider(): Promise<AIProvider> {
     const config = vscode.workspace.getConfiguration('silentspec');
@@ -86,7 +125,7 @@ export function activate(context: vscode.ExtensionContext) {
     return getProvider(context);
   }
 
-  // Returns provider name string — single await, reused for logging
+  // Returns provider name — single await, reused for logging
   async function getActiveProviderName(): Promise<string> {
     const config = vscode.workspace.getConfiguration('silentspec');
     const configuredProvider = config.get<string>('provider', 'github');
@@ -159,34 +198,48 @@ export function activate(context: vscode.ExtensionContext) {
         (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
         async (prompt, filePath, log, abortSignal, isMerge) => {
           processingQueue.enqueue(async () => {
-            // Resolve provider once — reuse for both logging and generation
             const providerName = await getActiveProviderName();
             const provider = await getActiveProvider();
+
+            // Cost acknowledgement — one-time warning for paid providers
+            const canProceed = await checkCostAcknowledgement(context, providerName);
+            if (!canProceed) {
+              updateStatusBar('$(info) SS: Cancelled');
+              setTimeout(() => updateStatusBar(), 3000);
+              return;
+            }
 
             log(`Gap Finder: calling ${providerName}...`);
             updateStatusBar('$(sync~spin) SS: Generating...');
 
-            const raw = await provider.generateTests(prompt, log, abortSignal);
+            const controller = new AbortController();
+            activeControllers.add(controller);
 
-            if (!raw) {
-              updateStatusBar('$(warning) SS: Failed');
-              return;
+            try {
+              const raw = await provider.generateTests(prompt, log, controller.signal);
+
+              if (!raw) {
+                updateStatusBar('$(warning) SS: Failed');
+                return;
+              }
+
+              const validated = validateResponse(raw, log);
+              if (!validated) {
+                updateStatusBar('$(warning) SS: Failed');
+                return;
+              }
+
+              if (isMerge) {
+                await mergeSpecFile(filePath, validated, log);
+              } else {
+                await writeSpecFile(filePath, validated, log);
+              }
+
+              updateStatusBar('$(check) SS: Done');
+              setTimeout(() => updateStatusBar(), 3000);
+            } finally {
+              activeControllers.delete(controller);
             }
-
-            const validated = validateResponse(raw, log);
-            if (!validated) {
-              updateStatusBar('$(warning) SS: Failed');
-              return;
-            }
-
-            if (isMerge) {
-              await mergeSpecFile(filePath, validated, log);
-            } else {
-              await writeSpecFile(filePath, validated, log);
-            }
-
-            updateStatusBar('$(check) SS: Done');
-            setTimeout(() => updateStatusBar(), 3000);
           });
         }
       );
@@ -194,51 +247,67 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(gapFinderCmd);
 
-  function updateStatus(text: string): void {
-    if (!text) { updateStatusBar(); return; }
-    statusBar.text = text;
-    statusBar.backgroundColor = undefined;
-  }
-
   // Register save handler
   registerSaveHandler(context, () => isPaused, updateStatus, async (prompt, filePath, log, abortSignal) => {
     processingQueue.enqueue(async () => {
-      // Resolve provider once — reuse for both logging and generation
-      // Live check ensures Ollama state is current even if killed mid-session
       const providerName = await getActiveProviderName();
       const provider = await getActiveProvider();
+
+      // Cost acknowledgement — one-time warning for paid providers
+      const canProceed = await checkCostAcknowledgement(context, providerName);
+      if (!canProceed) {
+        updateStatusBar('$(info) SS: Cancelled');
+        setTimeout(() => updateStatusBar(), 3000);
+        return;
+      }
 
       log(`Calling ${providerName} for ${filePath}...`);
       updateStatusBar('$(sync~spin) SS: Generating...');
 
-      const raw = await provider.generateTests(prompt, log, abortSignal);
+      const controller = new AbortController();
+      activeControllers.add(controller);
 
-      if (!raw) {
-        updateStatusBar('$(warning) SS: Failed');
-        return;
+      // Forward external abort signal (re-save cancellation) to our controller
+      abortSignal.addEventListener('abort', () => controller.abort());
+
+      try {
+        const raw = await provider.generateTests(prompt, log, controller.signal);
+
+        if (!raw) {
+          updateStatusBar('$(warning) SS: Failed');
+          return;
+        }
+
+        const validated = validateResponse(raw, log);
+
+        if (!validated) {
+          updateStatusBar('$(warning) SS: Failed');
+          return;
+        }
+
+        if (validated.includes('// [SS-PARTIAL]')) {
+          log(`Warning: partial generation — token limit reached for ${filePath}`);
+          updateStatusBar('$(warning) SS: Partial');
+        }
+
+        log(`Response validated — writing spec file for ${filePath}`);
+        await writeSpecFile(filePath, validated, log);
+
+        setTimeout(() => updateStatusBar(), 3000);
+        updateStatusBar('$(check) SS: Done');
+      } finally {
+        activeControllers.delete(controller);
       }
-
-      const validated = validateResponse(raw, log);
-
-      if (!validated) {
-        updateStatusBar('$(warning) SS: Failed');
-        return;
-      }
-
-      if (validated.includes('// [SS-PARTIAL]')) {
-        log(`Warning: partial generation — token limit reached for ${filePath}`);
-        updateStatusBar('$(warning) SS: Partial');
-      }
-
-      log(`Response validated — writing spec file for ${filePath}`);
-      await writeSpecFile(filePath, validated, log);
-
-      setTimeout(() => updateStatusBar(), 3000);
-      updateStatusBar('$(check) SS: Done');
     });
   });
 
   context.subscriptions.push(outputChannel);
 }
 
-export function deactivate() {}
+export function deactivate() {
+  // Abort all in-flight requests on extension unload
+  for (const controller of activeControllers) {
+    controller.abort();
+  }
+  activeControllers.clear();
+}

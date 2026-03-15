@@ -29,7 +29,20 @@ export class GitHubModelsProvider implements AIProvider {
     const token = await this.secrets.get('silentspec.githubToken');
 
     if (!token) {
-      log('Error: GitHub token not set — run SilentSpec: Set API Key and select github');
+      log('Error: GitHub token not set — showing setup guidance');
+        void vscode.window.showInformationMessage(
+          'SilentSpec needs a free GitHub token to generate tests.',
+          'Set Up Token',
+          'Open GitHub Tokens Page'
+        ).then(action => {
+          if (action === 'Set Up Token') {
+            void vscode.commands.executeCommand('silentspec.setApiKey');
+          } else if (action === 'Open GitHub Tokens Page') {
+            void vscode.env.openExternal(
+              vscode.Uri.parse('https://github.com/settings/tokens')
+            );
+          }
+        });
       return null;
     }
 
@@ -65,7 +78,23 @@ export class GitHubModelsProvider implements AIProvider {
 
       if (!response.ok) {
         const errorBody = await response.text();
-        log(`Error: GitHub Models returned ${response.status} — ${errorBody}`);
+
+        // Handle expired or revoked token — clear key and prompt re-setup
+        if (response.status === 401) {
+          log('Error: API key rejected (401) — key may be expired or revoked');
+          await this.secrets.delete('silentspec.githubToken'); // use correct key per provider
+          void vscode.window.showWarningMessage(
+            'SilentSpec: Your API key was rejected. It may have expired or been revoked.',
+            'Set Up New Key'
+          ).then(action => {
+            if (action === 'Set Up New Key') {
+              void vscode.commands.executeCommand('silentspec.setApiKey');
+            }
+          });
+          return null;
+        }
+        
+        log(`Error: API returned ${response.status} — ${errorBody}`);
         return null;
       }
 

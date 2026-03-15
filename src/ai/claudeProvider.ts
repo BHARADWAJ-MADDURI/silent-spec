@@ -29,7 +29,20 @@ export class ClaudeProvider implements AIProvider {
     const apiKey = await this.secrets.get('silentspec.claudeApiKey');
 
     if (!apiKey) {
-      log('Error: Claude API key not set — run SilentSpec: Set API Key');
+      log('Error: Claude API key not set — showing setup guidance');
+        void vscode.window.showInformationMessage(
+          'SilentSpec: Claude API key not set.',
+          'Set Up Key',
+          'Open Anthropic Console'
+        ).then(action => {
+          if (action === 'Set Up Key') {
+            void vscode.commands.executeCommand('silentspec.setApiKey');
+          } else if (action === 'Open Anthropic Console') {
+            void vscode.env.openExternal(
+              vscode.Uri.parse('https://console.anthropic.com/keys')
+            );
+          }
+        });
       return null;
     }
     const controller = new AbortController();
@@ -62,8 +75,25 @@ export class ClaudeProvider implements AIProvider {
 
       if (!response.ok) {
         const errorBody = await response.text();
-        log(`Error: Claude API returned ${response.status} ${response.statusText}— ${errorBody}`);
+
+        // Handle expired or revoked token — clear key and prompt re-setup
+        if (response.status === 401) {
+          log('Error: API key rejected (401) — key may be expired or revoked');
+          await this.secrets.delete('silentspec.claudeApiKey'); // use correct key per provider
+          void vscode.window.showWarningMessage(
+            'SilentSpec: Your API key was rejected. It may have expired or been revoked.',
+            'Set Up New Key'
+          ).then(action => {
+            if (action === 'Set Up New Key') {
+              void vscode.commands.executeCommand('silentspec.setApiKey');
+            }
+          });
+          return null;
+        }
+
+        log(`Error: API returned ${response.status} — ${errorBody}`);
         return null;
+
       }
 
       const data = await response.json() as {

@@ -4,6 +4,7 @@ import { analyzeFile } from './astAnalyzer';
 import { extractContext } from './contextExtractor';
 import { buildPrompt } from './promptBuilder';
 import { resolveSpecPath } from './fileWriter';
+import * as fs from 'fs';
 
 export const outputChannel = vscode.window.createOutputChannel('SilentSpec');
 
@@ -56,6 +57,9 @@ export function registerSaveHandler(
 
   const saveListener = vscode.workspace.onDidSaveTextDocument(
     (document: vscode.TextDocument) => {
+
+      if (document.isUntitled) { return; }
+      if (document.uri.scheme !== 'file') { return; }
       const filePath = document.uri.fsPath;
 
       if (isPausedFn()) {
@@ -80,6 +84,11 @@ export function registerSaveHandler(
         debounceTimers.delete(filePath);
 
         void (async () => {
+          // Ghost file check — file may have been renamed/moved during debounce
+          if (!fs.existsSync(filePath)) {
+            log(`Skipped: file no longer exists — ${filePath}`);
+            return;
+          }
           // Phase 2 — AST gate
           const result = analyzeFile(filePath, log);
           if (!result.isTestable) {
