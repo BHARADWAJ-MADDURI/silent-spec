@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { registerSaveHandler, outputChannel } from './saveHandler';
 import { AIProvider } from './ai/aiProvider';
@@ -7,7 +8,7 @@ import { OllamaProvider } from './ai/ollamaProvider';
 import { GitHubModelsProvider } from './ai/githubModelsProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
-import { writeSpecFile, mergeSpecFile } from './fileWriter';
+import { writeSpecFile, mergeSpecFile, resolveSpecPath } from './fileWriter';
 import { runGapFinder } from './gapFinder';
 
 // Module-level — track active controllers for clean abort on deactivate
@@ -33,10 +34,7 @@ async function checkCostAcknowledgement(
   context: vscode.ExtensionContext,
   providerName: string
 ): Promise<boolean> {
-  // Free providers — no warning needed
   if (providerName !== 'claude' && providerName !== 'openai') { return true; }
-
-  // Race guard — prevents multiple popups on simultaneous saves
   if (costCheckInProgress) { return false; }
 
   const key = `silentspec.${providerName}.costAcknowledged`;
@@ -76,13 +74,11 @@ function getProvider(
     return new GitHubModelsProvider(modelOverride).withSecrets(context.secrets);
   }
 
-  // ollama — free, local, no API key needed
   return new OllamaProvider(modelOverride);
 }
 
 export function activate(context: vscode.ExtensionContext) {
 
-  // Status bar
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right, 100
   );
@@ -105,27 +101,22 @@ export function activate(context: vscode.ExtensionContext) {
       : undefined;
   }
 
-  // updateStatus — passed to saveHandler for skip reason display
   function updateStatus(text: string): void {
     if (!text) { updateStatusBar(); return; }
     statusBar.text = text;
     statusBar.backgroundColor = undefined;
   }
 
-  // Live Ollama check — called on every generation to handle mid-session kills
   async function getActiveProvider(): Promise<AIProvider> {
     const config = vscode.workspace.getConfiguration('silentspec');
     const configuredProvider = config.get<string>('provider', 'github');
     if (configuredProvider === 'github') {
       const ollamaUp = await isOllamaRunning();
-      if (ollamaUp) {
-        return getProvider(context, 'ollama');
-      }
+      if (ollamaUp) { return getProvider(context, 'ollama'); }
     }
     return getProvider(context);
   }
 
-  // Returns provider name — single await, reused for logging
   async function getActiveProviderName(): Promise<string> {
     const config = vscode.workspace.getConfiguration('silentspec');
     const configuredProvider = config.get<string>('provider', 'github');
@@ -140,7 +131,7 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar.show();
   context.subscriptions.push(statusBar);
 
-  // Toggle pause command
+  // Toggle pause
   const toggleCmd = vscode.commands.registerCommand(
     'silentspec.togglePause',
     async () => {
@@ -151,7 +142,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(toggleCmd);
 
-  // Set API key command — handles all providers
+  // Set API key
   const setKeyCmd = vscode.commands.registerCommand(
     'silentspec.setApiKey',
     async () => {
@@ -176,11 +167,8 @@ export function activate(context: vscode.ExtensionContext) {
         ? 'silentspec.githubToken'
         : 'silentspec.openaiApiKey';
 
-      const displayName = provider === 'claude'
-        ? 'Claude'
-        : provider === 'github'
-        ? 'GitHub'
-        : 'OpenAI';
+      const displayName = provider === 'claude' ? 'Claude'
+        : provider === 'github' ? 'GitHub' : 'OpenAI';
 
       await context.secrets.store(secretKey, key.trim());
       vscode.window.showInformationMessage(
@@ -189,6 +177,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(setKeyCmd);
+
+  // Open output log command — Phase 9
+  const openLogCmd = vscode.commands.registerCommand(
+    'silentspec.openLog',
+    () => outputChannel.show()
+  );
+  context.subscriptions.push(openLogCmd);
 
   // Gap Finder command
   const gapFinderCmd = vscode.commands.registerCommand(
@@ -201,7 +196,6 @@ export function activate(context: vscode.ExtensionContext) {
             const providerName = await getActiveProviderName();
             const provider = await getActiveProvider();
 
-            // Cost acknowledgement — one-time warning for paid providers
             const canProceed = await checkCostAcknowledgement(context, providerName);
             if (!canProceed) {
               updateStatusBar('$(info) SS: Cancelled');
@@ -218,16 +212,10 @@ export function activate(context: vscode.ExtensionContext) {
             try {
               const raw = await provider.generateTests(prompt, log, controller.signal);
 
-              if (!raw) {
-                updateStatusBar('$(warning) SS: Failed');
-                return;
-              }
+              if (!raw) { updateStatusBar('$(warning) SS: Failed'); return; }
 
               const validated = validateResponse(raw, log);
-              if (!validated) {
-                updateStatusBar('$(warning) SS: Failed');
-                return;
-              }
+              if (!validated) { updateStatusBar('$(warning) SS: Failed'); return; }
 
               if (isMerge) {
                 await mergeSpecFile(filePath, validated, log);
@@ -253,7 +241,6 @@ export function activate(context: vscode.ExtensionContext) {
       const providerName = await getActiveProviderName();
       const provider = await getActiveProvider();
 
-      // Cost acknowledgement — one-time warning for paid providers
       const canProceed = await checkCostAcknowledgement(context, providerName);
       if (!canProceed) {
         updateStatusBar('$(info) SS: Cancelled');
@@ -267,31 +254,46 @@ export function activate(context: vscode.ExtensionContext) {
       const controller = new AbortController();
       activeControllers.add(controller);
 
-      // Forward external abort signal (re-save cancellation) to our controller
       abortSignal.addEventListener('abort', () => controller.abort());
 
       try {
         const raw = await provider.generateTests(prompt, log, controller.signal);
 
-        if (!raw) {
-          updateStatusBar('$(warning) SS: Failed');
-          return;
-        }
+        if (!raw) { updateStatusBar('$(warning) SS: Failed'); return; }
 
         const validated = validateResponse(raw, log);
-
-        if (!validated) {
-          updateStatusBar('$(warning) SS: Failed');
-          return;
-        }
+        if (!validated) { updateStatusBar('$(warning) SS: Failed'); return; }
 
         if (validated.includes('// [SS-PARTIAL]')) {
           log(`Warning: partial generation — token limit reached for ${filePath}`);
           updateStatusBar('$(warning) SS: Partial');
         }
 
+        // Extract exported functions from validated output for header
+        // Count describe blocks as proxy — each describe = one function covered
+        const coveredFunctions = (validated.match(/describe\(['"`]([^'"`]+)['"`]/g) || [])
+          .map(m => m.replace(/describe\(['"`]/, '').replace(/['"`]$/, ''));
+
         log(`Response validated — writing spec file for ${filePath}`);
-        await writeSpecFile(filePath, validated, log);
+        await writeSpecFile(filePath, validated, log, coveredFunctions);
+
+        // Phase 9 — first-run success notification shown once ever
+        const firstSuccess = context.globalState.get<boolean>('silentspec.firstSuccessShown', false);
+        if (!firstSuccess) {
+          await context.globalState.update('silentspec.firstSuccessShown', true);
+          void vscode.window.showInformationMessage(
+            `SilentSpec generated tests for ${path.basename(filePath)} ✓`,
+            'Open Test File'
+          ).then(async action => {
+            if (action === 'Open Test File') {
+              const specPath = await resolveSpecPath(filePath);
+              void vscode.window.showTextDocument(
+                vscode.Uri.file(specPath),
+                { viewColumn: vscode.ViewColumn.Beside }
+              );
+            }
+          });
+        }
 
         setTimeout(() => updateStatusBar(), 3000);
         updateStatusBar('$(check) SS: Done');
@@ -305,7 +307,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-  // Abort all in-flight requests on extension unload
   for (const controller of activeControllers) {
     controller.abort();
   }
