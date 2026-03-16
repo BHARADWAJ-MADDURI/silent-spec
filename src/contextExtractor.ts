@@ -22,6 +22,7 @@ export interface SilentSpecContext {
   isPrisma: boolean;
   specPath?: string;
   dependencyContext: DependencyContext[];
+  internalTypes: string[];
 }
 
 export interface MockHint {
@@ -223,7 +224,7 @@ export function extractContext(
     fileContent,
     filePath,
     exportedFunctions,
-    exportTypes,       // Phase 10 — passed through
+    exportTypes,       
     framework,
     testPatternSample,
     mockHints,
@@ -233,5 +234,6 @@ export function extractContext(
     isGraphQL,
     isPrisma,
     dependencyContext,
+    internalTypes: [], 
   };
 }

@@ -84,7 +84,8 @@ function fixImportStatement(
   filePath: string,
   specPath: string,
   exportedFunctions: string[],
-  exportTypes: Record<string, 'default' | 'named'>
+  exportTypes: Record<string, 'default' | 'named'>,
+  log: (msg: string) => void
 ): string {
   const sourceBaseName = path.basename(filePath, path.extname(filePath));
   const specDir = path.dirname(specPath);
@@ -111,14 +112,14 @@ function fixImportStatement(
   // NUCLEAR REGEX: Matches any import line that ends with your filename
   // This is much safer than matching the full relative path string
   const filenameNoExt = sourceBaseName.replace(/\.[tj]sx?$/, '');
-  const nuclearRegex = new RegExp(`import\\s+[\\s\\S]*?\\s+from\\s+['"].*${filenameNoExt}['"];?`, 'g');
+  const nuclearRegex = new RegExp(`import\\s+[\\s\\S]*?\\s+from\\s+['"].*${filenameNoExt}['"];?`, 'gm');
 
   if (nuclearRegex.test(validated)) {
-    console.log(`[SilentSpec] SUCCESS: Corrected import for ${filenameNoExt}`);
+    log(`Import corrected for ${filenameNoExt}`);
     return validated.replace(nuclearRegex, correctImport);
   }
 
-  console.log(`[SilentSpec] WARNING: No import found for ${filenameNoExt}, injecting at top`);
+  log(`Warning: no import found for ${filenameNoExt} — injecting after SS-GENERATED-START`);
   return validated.replace(
     '// <SS-GENERATED-START>',
     `// <SS-GENERATED-START>\n${correctImport}`
@@ -329,7 +330,8 @@ export function activate(context: vscode.ExtensionContext) {
                 filePath,
                 specPath,
                 exportedFunctions,
-                exportTypes
+                exportTypes,
+                log
               );
 
               if (fixedValidated !== validated) {
@@ -414,7 +416,8 @@ export function activate(context: vscode.ExtensionContext) {
           filePath,
           specPath,
           exportedFunctions,
-          exportTypes
+          exportTypes,
+          log
         );
 
         if (fixedValidated !== validated) {

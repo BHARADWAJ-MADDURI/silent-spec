@@ -109,6 +109,7 @@ export function registerSaveHandler(
             log,
             result.exportTypes
           );
+          ctx.internalTypes = result.internalTypes;
           log(`Context ready — framework=${ctx.framework}, pattern=${ctx.testPatternSample ? 'found' : 'none'}`);
 
           // Phase 7 — resolve specPath before buildPrompt

@@ -47,6 +47,20 @@ function buildImportSection(ctx: SilentSpecContext): string {
   ].join('\n');
 }
 
+function buildInternalTypeSection(ctx: SilentSpecContext): string {
+  if (!ctx.internalTypes || ctx.internalTypes.length === 0) { return ''; }
+
+  return [
+    '## SOURCE FILE TYPE CONSTRAINTS',
+    'These types and function signatures are defined in the source file being tested.',
+    'You MUST use these exact structures when creating mock data.',
+    'For generic functions, all test arguments must satisfy these constraints exactly.',
+    '```typescript',
+    ...ctx.internalTypes,
+    '```',
+  ].join('\n');
+}
+
 function buildRole(ctx: SilentSpecContext): string {
   const { isFrontend, isNestJS, isNextJS, isGraphQL, isPrisma } = ctx;
 
@@ -66,9 +80,34 @@ function buildRole(ctx: SilentSpecContext): string {
     '4. Descriptive test names: \'should return 404 when patient ID does not exist\'.',
     '5. Never use Date.now(), Math.random(), or any non-deterministic values.',
     '6. One describe() block per exported function or class.',
-    '7. When testing functions with TypeScript generics (e.g. <T extends ...>),',
-    '   use ONLY type-safe values that satisfy the generic constraint.',
-    '   Never pass null, undefined, or structurally incompatible objects to generic params.',
+    '7. GENERIC TYPE SAFETY — This is mandatory, not optional:',
+    '   When testing functions with TypeScript generic constraints',
+    '   (e.g. <T extends Record<string, unknown>>, <T extends object>, etc.),',
+    '   ALL arguments must satisfy the constraint — no exceptions.',
+    '   Rules:',
+    '   - If two arguments share a generic type T, they must be structurally compatible.',
+    '   - If source is typed as Partial<T>, it must only contain keys that exist in T.',
+    '   - Never pass an object with NEW keys that do not exist in the base type.',
+    '   - Use `typeof` to derive types from existing variables when in doubt:',
+    '     const base = { a: 1, b: 2 };',
+    '     const override: Partial<typeof base> = { b: 3 }; // safe',
+    '   - Never pass null, undefined, or structurally unrelated objects to generic params.',
+    '8. Never use `delete global.fetch` or `delete global.X` — use jest.restoreAllMocks() instead.',
+    '9. MOCK HYGIENE: When using jest.fn() or mocking globals (e.g. global.fetch = jest.fn()),',
+    '   you MUST include a beforeEach(() => jest.clearAllMocks()) block to prevent call count',
+    '   leakage between tests. This is mandatory — never skip it.',
+    '10. METHOD VERIFICATION: Before writing any test for a class, carefully read the',
+    '    ACTUAL method names defined in the source code provided.',
+    '    Do NOT assume method names based on base class or common conventions.',
+    '    If the source defines .dispatch(), use .dispatch().',
+    '    If the source defines .send(), use .send().',
+    '    If the source defines .publish(), use .publish().',
+    '    Never substitute an inherited method (e.g. .emit()) for a custom-defined one.',
+    '11. RETRY LOGIC: When testing functions that retry in a loop:',
+    '    - Read the loop bounds carefully (0-indexed vs 1-indexed).',
+    '    - toHaveBeenCalledTimes must match the EXACT number of attempts.',
+    '    - A loop from i=0 to i<N means N total calls — not N+1.',
+    '    - Always use beforeEach(() => jest.clearAllMocks()) to reset call counts between tests.',
   ].join('\n');
 
   const extras: string[] = [];
@@ -211,8 +250,13 @@ function buildSelfCorrectionBlock(): string {
   return [
     '## Self-Review (Complete Before Outputting)',
     'After generating the tests, review them:',
-    '1. For every method or property accessed on a mock, verify it exists in the source.',
-    '   Remove any test that calls a method not present in the source file.',
+    '1. METHOD AUDIT: For every method call on any class instance or mock,',
+    '   verify the method name exists in the SOURCE CODE provided above.',
+    '   - Check the actual class definition — not what you assume it inherits.',
+    '   - If a class overrides or wraps inherited behavior with a custom method,',
+    '     use the custom method name, never the inherited one.',
+    '   - Remove or rewrite any test that calls a method not explicitly defined',
+    '     or imported in the source file.',
     '2. Remove flaky patterns:',
     '   - setTimeout/setInterval in test bodies',
     '   - Date.now() or new Date() without mocking',
@@ -230,6 +274,26 @@ function buildSelfCorrectionBlock(): string {
     '9. IMPORT VERIFICATION: Compare your import statement against the',
     '   "CRITICAL — Import Statement" section above. They must be identical.',
     '   If they differ, fix your import — do not modify the required import.',
+    '10. FETCH MOCKING: Never use `delete global.fetch` to clean up fetch mocks.',
+    '    Always use `jest.restoreAllMocks()` or `jest.resetAllMocks()` in afterEach.',
+    '    Mock fetch using: `global.fetch = jest.fn() as jest.Mock;` in beforeEach.',
+    '11. MOCK ISOLATION AUDIT: Scan every describe() block that uses jest.fn() or',
+    '    mocks globals. Confirm each one has a beforeEach(() => jest.clearAllMocks()).',
+    '    If any describe block is missing it, add it before outputting.',
+    '12. GENERIC TYPE AUDIT: For every test that calls a generic function,',
+    '    verify all arguments are structurally compatible with the generic constraint.',
+    '    If source is Partial<T>, confirm it only contains keys present in the target.',
+    '    Fix any type incompatibility before outputting.',
+    '13. ERROR PATH AUDIT: Before writing any test that uses .toThrow() or rejects.toThrow(),',
+    '    scan the function body in the source code for an explicit throw statement,',
+    '    Promise.reject(), or error condition for that specific input.',
+    '    If NO throw exists in the source for that input — DELETE the test entirely.',
+    '    EXAMPLES of functions that NEVER throw:',
+    '    - String(null) → returns "null", never throws',
+    '    - Number(undefined) → returns NaN, never throws',
+    '    - Spread/merge functions like {...target, ...source} → never throw',
+    '    - Boolean checks and type guards → never throw',
+    '    Only write .toThrow() tests when the source explicitly contains: throw new Error(...)',
   ].join('\n');
 }
 
@@ -255,6 +319,7 @@ function buildDependencySection(ctx: SilentSpecContext): string {
 
 export function buildPrompt(ctx: SilentSpecContext): string {
   return [
+    buildInternalTypeSection(ctx), 
     buildRole(ctx),
     buildFileSection(ctx),
     buildFunctionSection(ctx),

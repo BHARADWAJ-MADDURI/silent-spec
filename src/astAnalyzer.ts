@@ -5,8 +5,9 @@ import * as path from 'path';
 export interface ASTAnalysisResult {
   isTestable: boolean;
   exportedFunctions: string[];
-  exportTypes: Record<string, 'default' | 'named'>; // Phase 10 — track export type
+  exportTypes: Record<string, 'default' | 'named'>; 
   imports: ImportInfo[];
+  internalTypes: string[];
   skipReason?: string;
 }
 
@@ -22,7 +23,7 @@ function parseFile(fileContent: string) {
       jsx: true,
       tokens: false,
       range: false,
-      loc: false,
+      loc: true,
       comment: false,
     });
   } catch {
@@ -136,6 +137,42 @@ function extractImports(ast: any, filePath: string): ImportInfo[] {
   return imports;
 }
 
+function extractTypeDefinitions(ast: any, fileContent: string): string[] {
+  const lines = fileContent.split('\n');
+  const types: string[] = [];
+
+  for (const node of ast.body) {
+    // Exported interfaces, types, enums
+    if (node.type === 'ExportNamedDeclaration' && node.declaration) {
+      const decl = node.declaration;
+      if (
+        decl.type === 'TSInterfaceDeclaration' ||
+        decl.type === 'TSTypeAliasDeclaration' ||
+        decl.type === 'TSEnumDeclaration'
+      ) {
+        const raw = lines
+          .slice(decl.loc.start.line - 1, decl.loc.end.line)
+          .join('\n')
+          .trim();
+        types.push(raw);
+      }
+    }
+
+    // Also capture exported function signatures with generic constraints
+    if (node.type === 'ExportNamedDeclaration' && node.declaration) {
+      const decl = node.declaration;
+      if (decl.type === 'FunctionDeclaration' && decl.id?.name) {
+        const sigLine = lines[decl.loc.start.line - 1].trim();
+        if (sigLine.includes('<') && sigLine.includes('extends')) {
+          types.push(sigLine);
+        }
+      }
+    }
+  }
+
+  return types;
+}
+
 export function analyzeFile(
   filePath: string,
   log?: (msg: string) => void
@@ -149,6 +186,7 @@ export function analyzeFile(
       exportedFunctions: [],
       exportTypes: {},
       imports: [],
+      internalTypes: [],
       skipReason: 'cannot read file'
     };
   }
@@ -160,6 +198,7 @@ export function analyzeFile(
       exportedFunctions: [],
       exportTypes: {},
       imports: [],
+      internalTypes: [],
       skipReason: 'syntax error'
     };
   }
@@ -201,6 +240,7 @@ export function analyzeFile(
       exportedFunctions: [],
       exportTypes: {},
       imports: [],
+      internalTypes: [],
       skipReason: 'no testable functions found',
     };
   }
@@ -211,5 +251,6 @@ export function analyzeFile(
     log?.(`Warning: unresolvable import ${brokenImport.source} — may use path aliases, continuing...`);
   }
 
-  return { isTestable: true, exportedFunctions, exportTypes, imports };
+  const internalTypes = extractTypeDefinitions(ast, fileContent);
+  return { isTestable: true, exportedFunctions, exportTypes, imports, internalTypes };
 }
