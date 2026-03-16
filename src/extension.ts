@@ -313,6 +313,7 @@ export function activate(context: vscode.ExtensionContext) {
               if (!raw) {
                 telemetry.recordFailure(providerName);
                 updateStatusBar('$(warning) SS: Failed');
+                setTimeout(() => updateStatusBar(), 3000);
                 return;
               }
 
@@ -320,6 +321,7 @@ export function activate(context: vscode.ExtensionContext) {
               if (!validated) {
                 telemetry.recordFailure(providerName);
                 updateStatusBar('$(warning) SS: Failed');
+                setTimeout(() => updateStatusBar(), 3000);
                 return;
               }
 
@@ -394,6 +396,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (!raw) {
           telemetry.recordFailure(providerName);
           updateStatusBar('$(warning) SS: Failed');
+          setTimeout(() => updateStatusBar(), 3000);
           return;
         }
 
@@ -401,6 +404,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (!validated) {
           telemetry.recordFailure(providerName);
           updateStatusBar('$(warning) SS: Failed');
+          setTimeout(() => updateStatusBar(), 3000);
           return;
         }
 
