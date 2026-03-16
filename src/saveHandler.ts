@@ -91,6 +91,14 @@ export function registerSaveHandler(
             log(`Skipped: file no longer exists — ${filePath}`);
             return;
           }
+          // Large file gate — skip files over 1500 lines
+          const fileLines = fs.readFileSync(filePath, 'utf8').split('\n');
+          if (fileLines.length > 1500) {
+            log(`Skipped: file too large (${fileLines.length} lines) — ${filePath}`);
+            updateStatus(`$(info) SS: Skipped — file too large`);
+            setTimeout(() => updateStatus(''), 3000);
+            return;
+          }
           // Phase 2 — AST gate
           const result = analyzeFile(filePath, log);
           if (!result.isTestable) {
