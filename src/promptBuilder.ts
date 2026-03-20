@@ -294,8 +294,13 @@ function buildSelfCorrectionBlock(): string {
     '    - Spread/merge functions like {...target, ...source} → never throw',
     '    - Boolean checks and type guards → never throw',
     '    Only write .toThrow() tests when the source explicitly contains: throw new Error(...)',
-    '14 — FUNCTION SIGNATURE AUDIT: verify argument types match', 
-    '    - the function signature exactly before writing any test call'
+    '14. FUNCTION SIGNATURE AUDIT: Before writing any test call, read the exact',
+    '    function signature in the source code.',
+    '    - Count the parameters — if the function takes 0 params, pass 0 args.',
+    '    - Check each parameter type — never pass a string where a number is expected.',
+    '    - Never pass arguments to a zero-parameter function.',
+    '    - Never omit required arguments.',
+    '    EXAMPLE: export function x(): void — call as x(), never x(null) or x("").',
 
   ].join('\n');
 }
