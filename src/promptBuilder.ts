@@ -294,6 +294,9 @@ function buildSelfCorrectionBlock(): string {
     '    - Spread/merge functions like {...target, ...source} → never throw',
     '    - Boolean checks and type guards → never throw',
     '    Only write .toThrow() tests when the source explicitly contains: throw new Error(...)',
+    '14 — FUNCTION SIGNATURE AUDIT: verify argument types match', 
+    '    - the function signature exactly before writing any test call'
+
   ].join('\n');
 }
 
