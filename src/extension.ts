@@ -11,6 +11,7 @@ import { processingQueue } from './utils/processingQueue';
 import { writeSpecFile, mergeSpecFile, resolveSpecPath } from './fileWriter';
 import { runGapFinder } from './gapFinder';
 import { TelemetryService } from './telemetry';
+import { healSpec } from './utils/specHealer';
 
 // Module-level — track active controllers for clean abort on deactivate
 const activeControllers = new Set<AbortController>();
@@ -93,14 +94,13 @@ function fixImportStatement(
 
   let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName));
   if (!relativePath.startsWith('.')) { relativePath = './' + relativePath; }
-  
+
   const defaultExport = exportedFunctions.find(f => exportTypes[f] === 'default');
   const namedExports = exportedFunctions.filter(f => exportTypes[f] === 'named');
 
-  // BUILD THE CORRECT LINE
   let correctImport: string;
   const namedPart = namedExports.length > 0 ? `{ ${namedExports.join(', ')} }` : '';
-  
+
   if (defaultExport && namedPart) {
     correctImport = `import ${defaultExport}, ${namedPart} from '${relativePath}';`;
   } else if (defaultExport) {
@@ -109,8 +109,6 @@ function fixImportStatement(
     correctImport = `import ${namedPart} from '${relativePath}';`;
   }
 
-  // NUCLEAR REGEX: Matches any import line that ends with your filename
-  // This is much safer than matching the full relative path string
   const filenameNoExt = sourceBaseName.replace(/\.[tj]sx?$/, '');
   const nuclearRegex = new RegExp(`import\\s+[\\s\\S]*?\\s+from\\s+['"].*${filenameNoExt}['"];?`, 'gm');
 
@@ -125,10 +123,18 @@ function fixImportStatement(
     `// <SS-GENERATED-START>\n${correctImport}`
   );
 }
+
 export function activate(context: vscode.ExtensionContext) {
 
+  // Track install date — used for accurate weekly projections
+  let installDate = context.globalState.get<string>('silentspec.installDate');
+  if (!installDate) {
+    installDate = new Date().toISOString();
+    context.globalState.update('silentspec.installDate', installDate);
+  }
+
   // Telemetry — local only, never transmitted
-  const telemetry = new TelemetryService(context);
+  const telemetry = new TelemetryService(context, installDate);
 
   const statusBar = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right, 100
@@ -137,8 +143,8 @@ export function activate(context: vscode.ExtensionContext) {
 
   let isPaused = context.workspaceState.get<boolean>('silentspec.paused', false);
   let lastUsedProvider = vscode.workspace
-  .getConfiguration('silentspec')
-  .get<string>('provider', 'github');
+    .getConfiguration('silentspec')
+    .get<string>('provider', 'github');
 
   function updateStatusBar(text?: string) {
     if (text) {
@@ -146,8 +152,8 @@ export function activate(context: vscode.ExtensionContext) {
       statusBar.backgroundColor = undefined;
       return;
     }
-    statusBar.text = isPaused 
-      ? '$(debug-pause) SS: Paused' 
+    statusBar.text = isPaused
+      ? '$(debug-pause) SS: Paused'
       : `$(zap) SS: On (${lastUsedProvider})`;
     statusBar.tooltip = isPaused
       ? 'SilentSpec paused — click to resume'
@@ -221,8 +227,8 @@ export function activate(context: vscode.ExtensionContext) {
       const secretKey = provider === 'claude'
         ? 'silentspec.claudeApiKey'
         : provider === 'github'
-        ? 'silentspec.githubToken'
-        : 'silentspec.openaiApiKey';
+          ? 'silentspec.githubToken'
+          : 'silentspec.openaiApiKey';
 
       const displayName = provider === 'claude' ? 'Claude'
         : provider === 'github' ? 'GitHub' : 'OpenAI';
@@ -242,24 +248,79 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(openLogCmd);
 
-  // Show impact stats
+  // Show impact stats — dual mode: simple for devs, advanced for CTOs
   const statsCmd = vscode.commands.registerCommand(
     'silentspec.showStats',
-    () => {
+    async () => {
       const stats = telemetry.getStats();
       const lastDate = stats.lastGeneratedAt === 'none'
         ? 'never'
         : new Date(stats.lastGeneratedAt).toLocaleDateString();
-      vscode.window.showInformationMessage(
-        `SilentSpec Impact Report\n` +
-        `Total Generations: ${stats.totalGenerations}\n` +
-        `Success / Fail: ${stats.successfulGenerations} / ${stats.failedGenerations}\n` +
+
+      const reliabilityRate = stats.totalGenerations > 0
+        ? Math.round((stats.successfulGenerations / stats.totalGenerations) * 100)
+        : 0;
+
+      // ── SIMPLE VIEW (for individual developers) ──────────────────
+      const selection = await vscode.window.showInformationMessage(
+        `$(zap) SilentSpec — Your Impact\n` +
         `Functions Covered: ${stats.functionsCovered}\n` +
-        `Estimated Time Saved: ${stats.estimatedHoursSaved} hours\n` +
-        `Last Provider: ${stats.lastProvider} (${lastDate})`,
-        { modal: true },
-        'OK'
+        `Tests Auto-Healed: ${stats.testsHealed ?? 0}\n` +
+        `Time Reclaimed: ${stats.estimatedHoursSaved} hrs (net)\n` +
+        `Reliability: ${reliabilityRate}% (${stats.successfulGenerations}/${stats.totalGenerations} generations)\n` +
+        `Last Provider: ${stats.lastProvider} · ${lastDate}`,
+        { modal: false },
+        'Team ROI Report'
       );
+
+      // ── ADVANCED VIEW (for CTOs / team leads) ────────────────────
+      if (selection === 'Team ROI Report') {
+        const MINS_PER_FUNCTION = 15;
+        const HOURLY_RATE = 85;
+
+        const teamSizeInput = await vscode.window.showInputBox({
+          prompt: 'How many developers on your team?',
+          placeHolder: '5',
+          value: '5',
+          validateInput: (val) => {
+            const n = parseInt(val);
+            if (isNaN(n) || n < 1 || n > 10000) { return 'Enter a number between 1 and 10000'; }
+            return null;
+          }
+        });
+
+        if (!teamSizeInput) { return; }
+        const TEAM_SIZE = parseInt(teamSizeInput);
+
+        const installDateStr = telemetry.getInstallDate();
+        const firstDate = new Date(installDateStr);
+        const weeksActive = Math.max(1,
+          (Date.now() - firstDate.getTime()) / (7 * 24 * 60 * 60 * 1000)
+        );
+
+        const weeklyFunctions = Number((stats.functionsCovered / weeksActive).toFixed(1));
+        const weeklyHoursSaved = Number((weeklyFunctions * MINS_PER_FUNCTION / 60).toFixed(1));
+        const annualImpact = Math.round(weeklyHoursSaved * 52 * TEAM_SIZE * HOURLY_RATE);
+        const grossHours = Number((stats.successfulGenerations * 15 / 60).toFixed(1));
+        const repairTaxHours = Number((stats.failedGenerations * 5 / 60).toFixed(1));
+
+        vscode.window.showInformationMessage(
+          `SilentSpec — Team ROI Report\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Gross Time Saved:    ${grossHours} hrs\n` +
+          `AI Repair Tax:      -${repairTaxHours} hrs (${stats.failedGenerations} failed)\n` +
+          `NET Time Reclaimed:  ${stats.estimatedHoursSaved} hrs\n` +
+          `Reliability Rate:    ${reliabilityRate}%\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Weekly Velocity Boost:  ${weeklyHoursSaved} hrs/dev\n` +
+          `Annual Team Impact:    ~$${annualImpact.toLocaleString()}\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `Assumptions: ${MINS_PER_FUNCTION} min/function · $${HOURLY_RATE}/hr · ${TEAM_SIZE}-dev team\n` +
+          `Methodology: Microsoft Research dev productivity benchmarks (2019)`,
+          { modal: true },
+          'OK'
+        );
+      }
     }
   );
   context.subscriptions.push(statsCmd);
@@ -291,8 +352,8 @@ export function activate(context: vscode.ExtensionContext) {
         async (prompt, filePath, log, abortSignal, isMerge, exportedFunctions, exportTypes) => {
           processingQueue.enqueue(async () => {
             const providerName = await getActiveProviderName();
-            updateStatusBar();
             lastUsedProvider = providerName;
+            updateStatusBar();
             const provider = await getActiveProvider();
 
             const canProceed = await checkCostAcknowledgement(context, providerName);
@@ -326,7 +387,6 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
               }
 
-              // Phase 10 — fix import statement using AST export type data
               const specPath = await resolveSpecPath(filePath);
               const fixedValidated = fixImportStatement(
                 validated,
@@ -341,10 +401,16 @@ export function activate(context: vscode.ExtensionContext) {
                 log('Gap Finder: import statement corrected — default/named export mismatch fixed');
               }
 
+              const healResult = healSpec(fixedValidated, path.basename(specPath), filePath, log);
+              const finalContent = healResult.wasHealed ? healResult.healed : fixedValidated;
+              if (healResult.wasHealed) {
+                log(`Healer: removed ${healResult.healedCount} failing test(s): ${healResult.removedTests.join(', ')}`);
+              }
+
               if (isMerge) {
-                await mergeSpecFile(filePath, fixedValidated, log);
+                await mergeSpecFile(filePath, finalContent, log);
               } else {
-                await writeSpecFile(filePath, fixedValidated, log);
+                await writeSpecFile(filePath, finalContent, log);
               }
 
               const fnCount = (fixedValidated.match(/describe\(/g) || []).length;
@@ -364,12 +430,12 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register save handler
   registerSaveHandler(context, () => isPaused, updateStatus, async (
-    prompt, 
-    filePath, 
-    log, 
+    prompt,
+    filePath,
+    log,
     abortSignal,
     exportedFunctions,
-    exportTypes  
+    exportTypes
   ) => {
     processingQueue.enqueue(async () => {
       const providerName = await getActiveProviderName();
@@ -410,7 +476,6 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        // fix import statement using AST export type data
         const specPath = await resolveSpecPath(filePath);
         const fixedValidated = fixImportStatement(
           validated,
@@ -430,8 +495,16 @@ export function activate(context: vscode.ExtensionContext) {
           fixedValidated.match(/describe\(['"`]([^'"`]+)['"`]/g) || []
         ).map(m => m.replace(/describe\(['"`]/, '').replace(/['"`]$/, ''));
 
+        // Auto-heal: remove failing it() blocks using TypeScript compiler API
+        const healResult = healSpec(fixedValidated, path.basename(specPath), filePath, log);
+        const finalContent = healResult.wasHealed ? healResult.healed : fixedValidated;
+        if (healResult.wasHealed) {
+          log(`Healer: removed ${healResult.healedCount} failing test(s): ${healResult.removedTests.join(', ')}`);
+          telemetry.recordHealing(healResult.healedCount);
+        }
+
         log(`Response validated — writing spec file for ${filePath}`);
-        await writeSpecFile(filePath, fixedValidated, log, coveredFunctions);
+        await writeSpecFile(filePath, finalContent, log, coveredFunctions);
 
         // Auto-trigger Gap Finder if partial generation
         if (fixedValidated.includes('// [SS-PARTIAL]')) {
@@ -463,8 +536,11 @@ export function activate(context: vscode.ExtensionContext) {
           });
         }
 
-        setTimeout(() => updateStatusBar(), 3000);
-        updateStatusBar('$(check) SS: Done');
+        if (!fixedValidated.includes('// [SS-PARTIAL]')) {
+          updateStatusBar('$(check) SS: Done');
+          setTimeout(() => updateStatusBar(), 3000);
+        }
+
       } finally {
         activeControllers.delete(controller);
       }

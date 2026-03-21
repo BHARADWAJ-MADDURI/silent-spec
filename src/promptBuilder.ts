@@ -14,7 +14,6 @@ function buildImportSection(ctx: SilentSpecContext): string {
   const specDir = path.dirname(specPath);
   const sourceDir = path.dirname(filePath);
 
-  // Compute relative path from spec to source
   let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName));
   if (!relativePath.startsWith('.')) { relativePath = './' + relativePath; }
 
@@ -24,13 +23,10 @@ function buildImportSection(ctx: SilentSpecContext): string {
   let importStatement: string;
 
   if (defaultExport && namedExports.length > 0) {
-    // Mixed: import bootstrap, { deepMerge, formatValue } from './chaos'
     importStatement = `import ${defaultExport}, { ${namedExports.join(', ')} } from '${relativePath}';`;
   } else if (defaultExport) {
-    // Default only: import bootstrap from './chaos'
     importStatement = `import ${defaultExport} from '${relativePath}';`;
   } else {
-    // Named only: import { deepMerge, formatValue } from './chaos'
     importStatement = `import { ${namedExports.join(', ')} } from '${relativePath}';`;
   }
 
@@ -95,10 +91,16 @@ function buildRole(ctx: SilentSpecContext): string {
     '     const base = { a: 1, b: 2 };',
     '     const override: Partial<typeof base> = { b: 3 }; // safe',
     '   - Never pass null, undefined, or structurally unrelated objects to generic params.',
+    '   - This applies to NESTED objects too: nested properties must match the base type shape.',
+    '   - NESTED OBJECTS: if a generic parameter contains nested objects, every nested object',
+    '     in the test must use the SAME keys as the corresponding nested object in the base type.',
+    '     Never introduce new keys at any nesting level.',
     '8. Never use `delete global.fetch` or `delete global.X` — use jest.restoreAllMocks() instead.',
     '9. MOCK HYGIENE: When using jest.fn() or mocking globals (e.g. global.fetch = jest.fn()),',
     '   you MUST include a beforeEach(() => jest.clearAllMocks()) block to prevent call count',
     '   leakage between tests. This is mandatory — never skip it.',
+    '   EXCEPTION: Do NOT add beforeEach(jest.clearAllMocks) if the describe block has NO mocks.',
+    '   Only add it when jest.fn() or global mocks are actually used in that describe block.',
     '10. METHOD VERIFICATION: Before writing any test for a class, carefully read the',
     '    ACTUAL method names defined in the source code provided.',
     '    Do NOT assume method names based on base class or common conventions.',
@@ -111,6 +113,34 @@ function buildRole(ctx: SilentSpecContext): string {
     '    - toHaveBeenCalledTimes must match the EXACT number of attempts.',
     '    - A loop from i=0 to i<N means N total calls — not N+1.',
     '    - Always use beforeEach(() => jest.clearAllMocks()) to reset call counts between tests.',
+    '12. JEST MOCK HOISTING: Never call jest.mock() inside it() or test() blocks.',
+    '    Jest hoists jest.mock() to the top of the file — inside test blocks it is ignored.',
+    '    To vary mock behavior per test, declare mock at top level then use mockReturnValue():',
+    '    TOP LEVEL: const mockFn = jest.fn(); jest.mock("@/lib/auth", () => ({ useLogin: mockFn }));',
+    '    INSIDE TEST: mockFn.mockReturnValue({ mutate: jest.fn(), isPending: true });',
+    '13. JEST GLOBALS: jest, describe, it, test, expect, beforeEach, afterEach, beforeAll, afterAll',
+    '    are Jest globals — they are available without any import statement.',
+    '    NEVER write: import jest from "jest-mock" or import { jest } from "@jest/globals".',
+    '    Remove any jest import statements — they are never needed.',
+    '14. FLOAT ASSERTIONS: When asserting on floating point results (division, Math operations),',
+    '    always use toBeCloseTo() instead of toBe().',
+    '    CORRECT: expect(result).toBeCloseTo(1.2);',
+    '    WRONG:   expect(result).toBe(1.2); // fails due to floating point precision',
+    '15. NaN ASSERTIONS: Never use toBe(NaN) — NaN !== NaN in JavaScript.',
+    '    Always use toBeNaN() for NaN assertions.',
+    '    CORRECT: expect(result).toBeNaN();',
+    '    WRONG:   expect(result).toBe(NaN); // always fails',
+    '16. MATH VERIFICATION: Before writing any numerical assertion, show your work.',
+    '    Calculate the expected value step by step in a comment, then write the assertion.',
+    '    EXAMPLE for meanAbsoluteDeviation([1,2,3,4]):',
+    '    // mean = (1+2+3+4)/4 = 2.5',
+    '    // deviations = |1-2.5|+|2-2.5|+|3-2.5|+|4-2.5| = 1.5+0.5+0.5+1.5 = 4',
+    '    // MAD = 4/4 = 1.0',
+    '    expect(meanAbsoluteDeviation([1,2,3,4])).toBeCloseTo(1.0);',
+    '17. RUNTIME vs COMPILE-TIME: TypeScript generics and types are ERASED at runtime.',
+    '    NEVER write expect(() => fn(x)).toThrow() just because x violates a TypeScript type.',
+    '    Generic type violations do NOT throw at runtime — they only cause compile errors.',
+    '    Only test for throws when the function SOURCE CODE has explicit: throw new Error(...)',
   ].join('\n');
 
   const extras: string[] = [];
@@ -122,7 +152,7 @@ function buildRole(ctx: SilentSpecContext): string {
       'Never use render, screen, userEvent, waitFor, or act without importing them. Missing RTL imports are the #1 cause of frontend test failures.');
   }
   if (isNestJS) {
-    extras.push('NestJS file: use Test.createTestingModule() for all service tests. Mock providers using { provide: ServiceName, useValue: mockObject }.');
+    extras.push('NestJS file: use Test.createTestingModule() for all service tests. Mock providers using { provide: ServiceName, useValue: mockObject }. Never mock @nestjs/common directly — it breaks the DI container.');
   }
   if (isNextJS) {
     extras.push('Next.js file: mock next/router, next/navigation, and next/headers at the module boundary. Do not test Next.js internals.');
@@ -256,67 +286,82 @@ function buildOutputInstruction(): string {
 function buildSelfCorrectionBlock(): string {
   return [
     '## Self-Review (Complete Before Outputting)',
-    'After generating the tests, review them:',
+    'After generating the tests, review them against every rule below:',
+    '',
     '1. METHOD AUDIT: For every method call on any class instance or mock,',
     '   verify the method name exists in the SOURCE CODE provided above.',
     '   - Check the actual class definition — not what you assume it inherits.',
-    '   - If a class overrides or wraps inherited behavior with a custom method,',
+    '   - If a class overrides inherited behavior with a custom method,',
     '     use the custom method name, never the inherited one.',
-    '   - Remove or rewrite any test that calls a method not explicitly defined',
-    '     or imported in the source file.',
-    '2. Remove flaky patterns:',
-    '   - setTimeout/setInterval in test bodies',
-    '   - Date.now() or new Date() without mocking',
-    '   - Math.random() or non-deterministic values',
-    '3. Verify every mock in Required Mocks is actually used — either in a beforeEach() setup or directly referenced in a test.',
+    '   - Remove or rewrite any test that calls a method not defined in the source.',
+    '',
+    '2. FLAKY PATTERN REMOVAL:',
+    '   - Remove setTimeout/setInterval in test bodies',
+    '   - Remove Date.now() or new Date() without mocking',
+    '   - Remove Math.random() or non-deterministic values',
+    '',
+    '3. Verify every mock in Required Mocks is actually used in a test or beforeEach.',
+    '',
     '4. Verify every import in the source file is either mocked or is a pure utility.',
+    '',
     '5. Confirm at least one error/failure test per exported function.',
-    '6. IMPORT COMPLETENESS: Every symbol used in the test file must have a corresponding import statement.',
-    '   FRONTEND CRITICAL: If you used render, screen, fireEvent, waitFor, act — verify imported from @testing-library/react.',
-    '   If you used userEvent — verify imported from @testing-library/user-event.',
-    '   If you used jest-dom matchers (toBeInTheDocument, toHaveTextContent) — verify @testing-library/jest-dom is imported.',
-    '   Missing RTL imports are the #1 cause of frontend test failures — check twice.',
-    '   NESTJS CRITICAL: If you used Test.createTestingModule — verify imported from @nestjs/testing.',
-    '   PRISMA CRITICAL: If you used PrismaClient mock — verify jest.mock(\'@prisma/client\') is present.',
-    '   EXPRESS CRITICAL: If you used Request or Response types — verify imported from express.',
-    '   GENERAL RULE: Scan every identifier in the test file — if it is not a Jest global (describe, it, expect, jest, beforeEach, afterEach, beforeAll, afterAll) and not imported, add the import.',
-    '7. Confirm the output starts with // <SS-GENERATED-START> and ends with // <SS-GENERATED-END>.',
-    '8. If you added a // [SS-PARTIAL] comment, confirm it:',
-    '   - Uses the exact format: // [SS-PARTIAL] Remaining functions: name1, name2',
-    '   - Lists every function that was not given a describe() block',
+    '',
+    '6. IMPORT COMPLETENESS: Every symbol used in the test file must be imported.',
+    '   FRONTEND: render, screen, fireEvent, waitFor, act → @testing-library/react',
+    '   FRONTEND: userEvent → @testing-library/user-event',
+    '   FRONTEND: jest-dom matchers → @testing-library/jest-dom',
+    '   NESTJS: Test, TestingModule → @nestjs/testing',
+    '   PRISMA: verify jest.mock(\'@prisma/client\') is present',
+    '   EXPRESS: Request, Response types → express',
+    '   JEST GLOBALS: describe, it, test, expect, jest, beforeEach, afterEach,',
+    '     beforeAll, afterAll are GLOBALS — never import them.',
+    '   NEVER write: import jest from "jest-mock" — jest is always a global.',
+    '',
+    '7. Confirm output starts with // <SS-GENERATED-START> and ends with // <SS-GENERATED-END>.',
+    '',
+    '8. SS-PARTIAL check: if you added // [SS-PARTIAL], confirm it:',
+    '   - Format: // [SS-PARTIAL] Remaining functions: name1, name2',
+    '   - Lists every function without a describe() block',
     '   - Is the last line before // <SS-GENERATED-END>',
-    'Then output the corrected final test file.',
-    '9. IMPORT VERIFICATION: Compare your import statement against the',
-    '   "CRITICAL — Import Statement" section above. They must be identical.',
-    '   If they differ, fix your import — do not modify the required import.',
-    '10. FETCH MOCKING: Never use `delete global.fetch` to clean up fetch mocks.',
-    '    Always use `jest.restoreAllMocks()` or `jest.resetAllMocks()` in afterEach.',
-    '    Mock fetch using: `global.fetch = jest.fn() as jest.Mock;` in beforeEach.',
-    '11. MOCK ISOLATION AUDIT: Scan every describe() block that uses jest.fn() or',
-    '    mocks globals. Confirm each one has a beforeEach(() => jest.clearAllMocks()).',
-    '    If any describe block is missing it, add it before outputting.',
-    '12. GENERIC TYPE AUDIT: For every test that calls a generic function,',
-    '    verify all arguments are structurally compatible with the generic constraint.',
-    '    If source is Partial<T>, confirm it only contains keys present in the target.',
-    '    Fix any type incompatibility before outputting.',
-    '13. ERROR PATH AUDIT: Before writing any test that uses .toThrow() or rejects.toThrow(),',
-    '    scan the function body in the source code for an explicit throw statement,',
-    '    Promise.reject(), or error condition for that specific input.',
-    '    If NO throw exists in the source for that input — DELETE the test entirely.',
-    '    EXAMPLES of functions that NEVER throw:',
-    '    - String(null) → returns "null", never throws',
-    '    - Number(undefined) → returns NaN, never throws',
-    '    - Spread/merge functions like {...target, ...source} → never throw',
-    '    - Boolean checks and type guards → never throw',
-    '    Only write .toThrow() tests when the source explicitly contains: throw new Error(...)',
-    '14. FUNCTION SIGNATURE AUDIT: Before writing any test call, read the exact',
-    '    function signature in the source code.',
-    '    - Count the parameters — if the function takes 0 params, pass 0 args.',
-    '    - Check each parameter type — never pass a string where a number is expected.',
-    '    - Never pass arguments to a zero-parameter function.',
-    '    - Never omit required arguments.',
-    '    EXAMPLE: export function x(): void — call as x(), never x(null) or x("").',
-
+    '',
+    '9. IMPORT VERIFICATION: Your import statement must be IDENTICAL to the',
+    '   "CRITICAL — Import Statement" section above. Fix if different.',
+    '',
+    '10. FETCH MOCKING: Never use `delete global.fetch`.',
+    '    Use jest.restoreAllMocks() or jest.resetAllMocks() in afterEach.',
+    '    Mock fetch with: global.fetch = jest.fn() as jest.Mock; in beforeEach.',
+    '',
+    '11. MOCK ISOLATION: For every describe() block using jest.fn() or global mocks,',
+    '    confirm it has beforeEach(() => jest.clearAllMocks()).',
+    '    Do NOT add it to describe blocks with no mocks — that is noise.',
+    '',
+    '12. GENERIC TYPE AUDIT: For every generic function call, verify all arguments',
+    '    satisfy the generic constraint. If source is Partial<T>, confirm the object',
+    '    only contains keys present in the base type — including nested objects.',
+    '    NESTED CHECK: At every level of nesting, verify the keys match the base type.',
+    '    Any new key introduced at any nesting level is a type violation — fix before outputting.',
+    '',
+    '13. ERROR PATH AUDIT: Before writing .toThrow() or rejects.toThrow(),',
+    '    verify the function actually throws for that input by reading the source.',
+    '    Functions that NEVER throw: String(), Number(), spread/merge, type guards.',
+    '    Only write .toThrow() when source has explicit: throw new Error(...)',
+    '',
+    '14. FUNCTION SIGNATURE AUDIT: Verify argument count and types match the signature.',
+    '    Zero-param functions: call as fn(), never fn(null) or fn("").',
+    '    Never omit required arguments.',
+    '',
+    '15. JEST MOCK HOISTING AUDIT: Verify no jest.mock() calls are inside it() or test().',
+    '    All jest.mock() must be at the TOP LEVEL of the file.',
+    '    To vary behavior per test: use mockReturnValue() inside each test.',
+    '',
+    '16. FLOAT PRECISION AUDIT: For any assertion on a floating point result,',
+    '    replace toBe() with toBeCloseTo().',
+    '    For NaN results, replace toBe(NaN) with toBeNaN().',
+    '',
+    '17. MOCK NECESSITY AUDIT: Only add beforeEach(jest.clearAllMocks) to describe blocks',
+    '    that actually use jest.fn() or mock globals. Remove it from blocks with no mocks.',
+    '',
+    'After completing all 17 checks, output the corrected final test file.',
   ].join('\n');
 }
 
@@ -342,7 +387,7 @@ function buildDependencySection(ctx: SilentSpecContext): string {
 
 export function buildPrompt(ctx: SilentSpecContext): string {
   return [
-    buildInternalTypeSection(ctx), 
+    buildInternalTypeSection(ctx),
     buildRole(ctx),
     buildFileSection(ctx),
     buildFunctionSection(ctx),
