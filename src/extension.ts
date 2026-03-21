@@ -291,6 +291,7 @@ export function activate(context: vscode.ExtensionContext) {
         async (prompt, filePath, log, abortSignal, isMerge, exportedFunctions, exportTypes) => {
           processingQueue.enqueue(async () => {
             const providerName = await getActiveProviderName();
+            updateStatusBar();
             lastUsedProvider = providerName;
             const provider = await getActiveProvider();
 
@@ -373,6 +374,7 @@ export function activate(context: vscode.ExtensionContext) {
     processingQueue.enqueue(async () => {
       const providerName = await getActiveProviderName();
       lastUsedProvider = providerName;
+      updateStatusBar();
       const provider = await getActiveProvider();
 
       const canProceed = await checkCostAcknowledgement(context, providerName);

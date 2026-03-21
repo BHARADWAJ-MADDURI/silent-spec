@@ -32,9 +32,13 @@
         "command": "silentspec.openLog",
         "title": "SilentSpec: Open Output Log"
       },
-      {
+       {
         "command": "silentspec.generateNow",
         "title": "SilentSpec: Generate Tests for Current File"
+      },
+      {
+        "command": "silentspec.showStats",
+        "title": "SilentSpec: Show Impact Report"
       }
     ],
     "configuration": {

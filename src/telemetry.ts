@@ -35,7 +35,10 @@ export class TelemetryService {
       };
     }
     try {
-      return JSON.parse(fs.readFileSync(this.statsPath, 'utf8')) as SilentSpecStats;
+      const stats = JSON.parse(fs.readFileSync(this.statsPath, 'utf8')) as SilentSpecStats;
+      // Always recalculate from functionsCovered to reflect any formula changes
+      stats.estimatedHoursSaved = Number((stats.functionsCovered * 15 / 60).toFixed(1));
+      return stats;
     } catch {
       // Corrupted stats file — reset silently
       return {
@@ -58,7 +61,7 @@ export class TelemetryService {
     stats.functionsCovered += Math.max(1, functionCount);
     // 5 minutes per function — industry average, clearly labeled as estimate
     stats.estimatedHoursSaved = Number(
-      (stats.functionsCovered * 5 / 60).toFixed(1)
+      (stats.functionsCovered * 15 / 60).toFixed(1)
     );
     stats.lastProvider = provider;
     stats.lastGeneratedAt = new Date().toISOString();

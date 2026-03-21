@@ -1,14 +1,55 @@
 import { AIProvider } from './aiProvider';
 
 const OLLAMA_BASE_URL = 'http://localhost:11434';
-const DEFAULT_MODEL   = 'deepseek-coder:6.7b';
+const DEFAULT_MODEL   = 'llama3.2'; 
+const PREFERRED_MODELS = [
+  'deepseek-coder:6.7b',
+  'deepseek-coder',
+  'codellama',
+  'codellama:7b',
+  'llama3.2',
+  'llama3',
+  'llama2',
+  'mistral',
+  'phi3',
+];
 const TIMEOUT_MS      = 120_000; // 2 minutes — local models are slower
+
+async function detectBestModel(): Promise<string> {
+  try {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
+      signal: AbortSignal.timeout(2000)
+    });
+    if (!response.ok) { return DEFAULT_MODEL; }
+    const data = await response.json() as { models?: { name: string }[] };
+    const available = data.models?.map(m => m.name) ?? [];
+    // Pick first preferred model that's available
+    for (const preferred of PREFERRED_MODELS) {
+      if (available.some(m => m.startsWith(preferred.split(':')[0]))) {
+        return available.find(m => m.startsWith(preferred.split(':')[0])) ?? preferred;
+      }
+    }
+    // Fall back to first available model
+    return available[0] ?? DEFAULT_MODEL;
+  } catch {
+    return DEFAULT_MODEL;
+  }
+}
 
 export class OllamaProvider implements AIProvider {
   private readonly model: string;
 
+  private resolvedModel: string | null = null;
+
   constructor(model?: string) {
     this.model = model || DEFAULT_MODEL;
+  }
+
+  private async getModel(): Promise<string> {
+    if (this.resolvedModel) { return this.resolvedModel; }
+    if (this.model !== DEFAULT_MODEL) { return this.model; }
+    this.resolvedModel = await detectBestModel();
+    return this.resolvedModel;
   }
   
   getSystemInstructions(): string {
@@ -31,7 +72,8 @@ export class OllamaProvider implements AIProvider {
       });
     }
 
-    log(`Ollama: generating with model ${this.model}...`);
+    const model = await this.getModel();
+    log(`Ollama: generating with model ${model}...`);
 
     try {
       const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -39,7 +81,7 @@ export class OllamaProvider implements AIProvider {
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          model: this.model,
+          model: model,
           prompt,
           stream: false,
           options: {
