@@ -65,7 +65,7 @@ function buildRole(ctx: SilentSpecContext): string {
   const { isFrontend, isNestJS, isNextJS, isGraphQL, isPrisma } = ctx;
 
   const base = [
-    'You are a senior QA engineer writing unit tests for a TypeScript project.',
+    'You are a principal QA engineer writing unit tests for a TypeScript project.',
     '',
     'Non-negotiable rules:',
     '1. Test BEHAVIOR and OUTCOMES — never test implementation details.',
@@ -73,9 +73,12 @@ function buildRole(ctx: SilentSpecContext): string {
     '   Good: expect(result.status).toBe(200)',
     '2. Cover ALL scenarios per exported function:',
     '   - Happy path (normal inputs, expected outputs)',
-    '   - Edge cases (null, undefined, empty string, 0, empty array)',
+    '   - Edge cases (null, undefined, empty string, 0, empty array, NaN, Infinity, negative numbers)',
     '   - Boundary values (max length, min/max numbers)',
     '   - Error paths (throw, rejected Promise, network failure)',
+    '   - Logic Boundaries: If a function uses a Set or Map, test for duplicate entries and isolation.',
+    '   - Type Guards: For functions returning `value is T`, test them inside Array.filter() to verify narrowing.',
+    '   - Async Termination: For retry logic, verify the function stops calling the dependency immediately after first success.',
     '3. Mock ALL external dependencies — never hit real databases or HTTP endpoints.',
     '4. Descriptive test names: \'should return 404 when patient ID does not exist\'.',
     '5. Never use Date.now(), Math.random(), or any non-deterministic values.',
@@ -113,6 +116,10 @@ function buildRole(ctx: SilentSpecContext): string {
   const extras: string[] = [];
   if (isFrontend) {
     extras.push('Frontend file: test rendered output and user interactions, not component internals. Use the appropriate testing library for the framework detected in the test pattern sample.');
+    extras.push('RTL IMPORTS: When using React Testing Library, ALWAYS import every utility you use:\n' +
+      '  import { render, screen, waitFor, act } from \'@testing-library/react\';\n' +
+      '  import userEvent from \'@testing-library/user-event\';\n' +
+      'Never use render, screen, userEvent, waitFor, or act without importing them. Missing RTL imports are the #1 cause of frontend test failures.');
   }
   if (isNestJS) {
     extras.push('NestJS file: use Test.createTestingModule() for all service tests. Mock providers using { provide: ServiceName, useValue: mockObject }.');
@@ -265,6 +272,14 @@ function buildSelfCorrectionBlock(): string {
     '4. Verify every import in the source file is either mocked or is a pure utility.',
     '5. Confirm at least one error/failure test per exported function.',
     '6. IMPORT COMPLETENESS: Every symbol used in the test file must have a corresponding import statement.',
+    '   FRONTEND CRITICAL: If you used render, screen, fireEvent, waitFor, act — verify imported from @testing-library/react.',
+    '   If you used userEvent — verify imported from @testing-library/user-event.',
+    '   If you used jest-dom matchers (toBeInTheDocument, toHaveTextContent) — verify @testing-library/jest-dom is imported.',
+    '   Missing RTL imports are the #1 cause of frontend test failures — check twice.',
+    '   NESTJS CRITICAL: If you used Test.createTestingModule — verify imported from @nestjs/testing.',
+    '   PRISMA CRITICAL: If you used PrismaClient mock — verify jest.mock(\'@prisma/client\') is present.',
+    '   EXPRESS CRITICAL: If you used Request or Response types — verify imported from express.',
+    '   GENERAL RULE: Scan every identifier in the test file — if it is not a Jest global (describe, it, expect, jest, beforeEach, afterEach, beforeAll, afterAll) and not imported, add the import.',
     '7. Confirm the output starts with // <SS-GENERATED-START> and ends with // <SS-GENERATED-END>.',
     '8. If you added a // [SS-PARTIAL] comment, confirm it:',
     '   - Uses the exact format: // [SS-PARTIAL] Remaining functions: name1, name2',

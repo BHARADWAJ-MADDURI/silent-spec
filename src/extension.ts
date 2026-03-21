@@ -408,11 +408,6 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        if (validated.includes('// [SS-PARTIAL]')) {
-          log(`Warning: partial generation — token limit reached for ${filePath}`);
-          updateStatusBar('$(warning) SS: Partial');
-        }
-
         // fix import statement using AST export type data
         const specPath = await resolveSpecPath(filePath);
         const fixedValidated = fixImportStatement(
@@ -435,6 +430,13 @@ export function activate(context: vscode.ExtensionContext) {
 
         log(`Response validated — writing spec file for ${filePath}`);
         await writeSpecFile(filePath, fixedValidated, log, coveredFunctions);
+
+        // Auto-trigger Gap Finder if partial generation
+        if (fixedValidated.includes('// [SS-PARTIAL]')) {
+          log(`Partial generation detected — auto-triggering Gap Finder for remaining functions`);
+          updateStatusBar('$(sync~spin) SS: Filling gaps...');
+          void vscode.commands.executeCommand('silentspec.findGaps');
+        }
 
         // Telemetry
         telemetry.recordSuccess(providerName, coveredFunctions.length);
