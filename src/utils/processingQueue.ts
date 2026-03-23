@@ -11,6 +11,10 @@ class ProcessingQueue {
     }
   }
 
+  get size(): number {
+  return this.queue.length + (this.running ? 1 : 0);
+  }
+
   private async drain(): Promise<void> {
     this.running = true;
     while (this.queue.length > 0) {

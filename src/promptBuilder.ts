@@ -1,13 +1,73 @@
 import * as path from 'path';
 import { SilentSpecContext } from "./contextExtractor";
 
-const MAX_FILE_CHARS = 32000;
+// Maximum characters of source file sent in the full-file section.
+// 8000 chars (~2000 tokens) is enough context for the AI to understand
+// imports, types, and surrounding code without blowing the token budget.
+// Functions beyond this window are handled by buildSignatureSection below.
+const MAX_FILE_CHARS = 8000;
 
-// Phase 10 — build exact import statement from AST export type map
-// Prevents AI from confusing default exports with named exports
+// Pure utility libraries that must never be mocked.
+const FORBIDDEN_MOCK_LIBS = [
+  'lodash', 'lodash-es', 'ramda', 'date-fns', 'date-fns-tz',
+  'moment', 'dayjs', 'dinero.js', 'mathjs', 'decimal.js', 'big.js',
+];
+
+// Local model/type/enum/constants files that should never be mocked.
+// TypeScript erases these at compile time — mocking them removes enum values.
+const LOCAL_MODEL_SEGMENT_RE = /^(models?|types?|enums?|constants?|dtos?|entities|entity|interfaces?|schemas?)$/i;
+const LOCAL_MODEL_SUFFIX_RE  = /\.(model|type|enum|constant|dto|entity|interface|schema)$/i;
+
+function isLocalModelMockPath(source: string): boolean {
+  if (!source.startsWith('.')) { return false; }
+  const lastSegment = (source.split('/').pop() ?? '').replace(/\.[tj]sx?$/, '');
+  return LOCAL_MODEL_SEGMENT_RE.test(lastSegment) || LOCAL_MODEL_SUFFIX_RE.test(lastSegment);
+}
+
+function getRootPackage(source: string): string {
+  if (!source) { return source; }
+  if (source.startsWith('@')) {
+    const [scope, name] = source.split('/');
+    return name ? `${scope}/${name}` : source;
+  }
+  return source.split('/')[0];
+}
+
+// Extracts the signature of a named export from source code.
+// Handles: export const fn = (...) =>, export function fn(...), curry wrappers.
+// Returns just the first meaningful line — enough for the AI to understand
+// parameter types and return type without sending the full implementation.
+function extractSignature(source: string, fnName: string): string {
+  const escaped = fnName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // export function fn(params): ReturnType
+  const funcMatch = source.match(
+    new RegExp(`(export\\s+(?:async\\s+)?function\\s+${escaped}\\s*\\([^)]*\\)[^{]*)`, 'm')
+  );
+  if (funcMatch) {
+    return funcMatch[1].trim() + ' { ... }';
+  }
+
+  // export const fn = ... (arrow function or curry)
+  const constMatch = source.match(
+    new RegExp(`(export\\s+const\\s+${escaped}\\s*=[^\\n]+)`, 'm')
+  );
+  if (constMatch) {
+    const line = constMatch[1].trim();
+    // curry wrapper — grab inner params from the next line
+    if (line.includes('curry(')) {
+      const pos = source.indexOf(constMatch[1]) + constMatch[1].length;
+      const nextLine = source.slice(pos, pos + 200).split('\n')[1]?.trim() ?? '';
+      return line + (nextLine ? '\n  ' + nextLine : '');
+    }
+    return line;
+  }
+
+  return `// ${fnName} — signature not visible in source window`;
+}
+
 function buildImportSection(ctx: SilentSpecContext): string {
   const { exportedFunctions, exportTypes, filePath, specPath } = ctx;
-
   if (!specPath || exportedFunctions.length === 0) { return ''; }
 
   const sourceBaseName = path.basename(filePath, path.extname(filePath));
@@ -21,7 +81,6 @@ function buildImportSection(ctx: SilentSpecContext): string {
   const namedExports = exportedFunctions.filter(f => exportTypes[f] === 'named');
 
   let importStatement: string;
-
   if (defaultExport && namedExports.length > 0) {
     importStatement = `import ${defaultExport}, { ${namedExports.join(', ')} } from '${relativePath}';`;
   } else if (defaultExport) {
@@ -38,19 +97,17 @@ function buildImportSection(ctx: SilentSpecContext): string {
     '',
     importStatement,
     '',
-    `Export type reference (for your information only):`,
+    'Export type reference (for your information only):',
     ...exportedFunctions.map(f => `  ${f}: ${exportTypes[f] ?? 'named'}`),
   ].join('\n');
 }
 
 function buildInternalTypeSection(ctx: SilentSpecContext): string {
   if (!ctx.internalTypes || ctx.internalTypes.length === 0) { return ''; }
-
   return [
     '## SOURCE FILE TYPE CONSTRAINTS',
     'These types and function signatures are defined in the source file being tested.',
     'You MUST use these exact structures when creating mock data.',
-    'For generic functions, all test arguments must satisfy these constraints exactly.',
     '```typescript',
     ...ctx.internalTypes,
     '```',
@@ -60,109 +117,72 @@ function buildInternalTypeSection(ctx: SilentSpecContext): string {
 function buildRole(ctx: SilentSpecContext): string {
   const { isFrontend, isNestJS, isNextJS, isGraphQL, isPrisma } = ctx;
 
-  const base = [
-    'You are a principal QA engineer writing unit tests for a TypeScript project.',
-    '',
-    'Non-negotiable rules:',
-    '1. Test BEHAVIOR and OUTCOMES — never test implementation details.',
-    '   Bad:  expect(service._fetchData).toHaveBeenCalled()',
-    '   Good: expect(result.status).toBe(200)',
-    '2. Cover ALL scenarios per exported function:',
-    '   - Happy path (normal inputs, expected outputs)',
-    '   - Edge cases (null, undefined, empty string, 0, empty array, NaN, Infinity, negative numbers)',
-    '   - Boundary values (max length, min/max numbers)',
-    '   - Error paths (throw, rejected Promise, network failure)',
-    '   - Logic Boundaries: If a function uses a Set or Map, test for duplicate entries and isolation.',
-    '   - Type Guards: For functions returning `value is T`, test them inside Array.filter() to verify narrowing.',
-    '   - Async Termination: For retry logic, verify the function stops calling the dependency immediately after first success.',
-    '3. Mock ALL external dependencies — never hit real databases or HTTP endpoints.',
-    '4. Descriptive test names: \'should return 404 when patient ID does not exist\'.',
-    '5. Never use Date.now(), Math.random(), or any non-deterministic values.',
-    '6. One describe() block per exported function or class.',
-    '7. GENERIC TYPE SAFETY — This is mandatory, not optional:',
-    '   When testing functions with TypeScript generic constraints',
-    '   (e.g. <T extends Record<string, unknown>>, <T extends object>, etc.),',
-    '   ALL arguments must satisfy the constraint — no exceptions.',
-    '   Rules:',
-    '   - If two arguments share a generic type T, they must be structurally compatible.',
-    '   - If source is typed as Partial<T>, it must only contain keys that exist in T.',
-    '   - Never pass an object with NEW keys that do not exist in the base type.',
-    '   - Use `typeof` to derive types from existing variables when in doubt:',
-    '     const base = { a: 1, b: 2 };',
-    '     const override: Partial<typeof base> = { b: 3 }; // safe',
-    '   - Never pass null, undefined, or structurally unrelated objects to generic params.',
-    '   - This applies to NESTED objects too: nested properties must match the base type shape.',
-    '   - NESTED OBJECTS: if a generic parameter contains nested objects, every nested object',
-    '     in the test must use the SAME keys as the corresponding nested object in the base type.',
-    '     Never introduce new keys at any nesting level.',
-    '8. Never use `delete global.fetch` or `delete global.X` — use jest.restoreAllMocks() instead.',
-    '9. MOCK HYGIENE: When using jest.fn() or mocking globals (e.g. global.fetch = jest.fn()),',
-    '   you MUST include a beforeEach(() => jest.clearAllMocks()) block to prevent call count',
-    '   leakage between tests. This is mandatory — never skip it.',
-    '   EXCEPTION: Do NOT add beforeEach(jest.clearAllMocks) if the describe block has NO mocks.',
-    '   Only add it when jest.fn() or global mocks are actually used in that describe block.',
-    '10. METHOD VERIFICATION: Before writing any test for a class, carefully read the',
-    '    ACTUAL method names defined in the source code provided.',
-    '    Do NOT assume method names based on base class or common conventions.',
-    '    If the source defines .dispatch(), use .dispatch().',
-    '    If the source defines .send(), use .send().',
-    '    If the source defines .publish(), use .publish().',
-    '    Never substitute an inherited method (e.g. .emit()) for a custom-defined one.',
-    '11. RETRY LOGIC: When testing functions that retry in a loop:',
-    '    - Read the loop bounds carefully (0-indexed vs 1-indexed).',
-    '    - toHaveBeenCalledTimes must match the EXACT number of attempts.',
-    '    - A loop from i=0 to i<N means N total calls — not N+1.',
-    '    - Always use beforeEach(() => jest.clearAllMocks()) to reset call counts between tests.',
-    '12. JEST MOCK HOISTING: Never call jest.mock() inside it() or test() blocks.',
-    '    Jest hoists jest.mock() to the top of the file — inside test blocks it is ignored.',
-    '    To vary mock behavior per test, declare mock at top level then use mockReturnValue():',
-    '    TOP LEVEL: const mockFn = jest.fn(); jest.mock("@/lib/auth", () => ({ useLogin: mockFn }));',
-    '    INSIDE TEST: mockFn.mockReturnValue({ mutate: jest.fn(), isPending: true });',
-    '13. JEST GLOBALS: jest, describe, it, test, expect, beforeEach, afterEach, beforeAll, afterAll',
-    '    are Jest globals — they are available without any import statement.',
-    '    NEVER write: import jest from "jest-mock" or import { jest } from "@jest/globals".',
-    '    Remove any jest import statements — they are never needed.',
-    '14. FLOAT ASSERTIONS: When asserting on floating point results (division, Math operations),',
-    '    always use toBeCloseTo() instead of toBe().',
-    '    CORRECT: expect(result).toBeCloseTo(1.2);',
-    '    WRONG:   expect(result).toBe(1.2); // fails due to floating point precision',
-    '15. NaN ASSERTIONS: Never use toBe(NaN) — NaN !== NaN in JavaScript.',
-    '    Always use toBeNaN() for NaN assertions.',
-    '    CORRECT: expect(result).toBeNaN();',
-    '    WRONG:   expect(result).toBe(NaN); // always fails',
-    '16. MATH VERIFICATION: Before writing any numerical assertion, show your work.',
-    '    Calculate the expected value step by step in a comment, then write the assertion.',
-    '    EXAMPLE for meanAbsoluteDeviation([1,2,3,4]):',
-    '    // mean = (1+2+3+4)/4 = 2.5',
-    '    // deviations = |1-2.5|+|2-2.5|+|3-2.5|+|4-2.5| = 1.5+0.5+0.5+1.5 = 4',
-    '    // MAD = 4/4 = 1.0',
-    '    expect(meanAbsoluteDeviation([1,2,3,4])).toBeCloseTo(1.0);',
-    '17. RUNTIME vs COMPILE-TIME: TypeScript generics and types are ERASED at runtime.',
-    '    NEVER write expect(() => fn(x)).toThrow() just because x violates a TypeScript type.',
-    '    Generic type violations do NOT throw at runtime — they only cause compile errors.',
-    '    Only test for throws when the function SOURCE CODE has explicit: throw new Error(...)',
-  ].join('\n');
+  const base = `You are a principal QA engineer writing unit tests for a TypeScript project.
+
+## Rules
+
+### Behavior & Coverage
+1. Test BEHAVIOR/OUTCOMES only. Bad: expect(service._fetch).toHaveBeenCalled(). Good: expect(result.status).toBe(200).
+2. Cover per function: happy path, edge cases (null/undefined/empty/''/0/NaN/Infinity/negatives/negative thresholds), boundaries, error paths, Set/Map duplicates, type guard Array.filter() narrowing, async retry termination.
+   Edge case assertion rule: Never assume how edge case inputs (negative numbers, zero, empty string, undefined, negative threshold values) are handled unless the source EXPLICITLY handles them with a condition, guard, or comment. If no explicit handling exists, you may still test with that input — but derive the expected value by mentally tracing the actual code, not by assuming "sensible" or "intuitive" behavior. When genuinely uncertain about expected output, use a weaker assertion (e.g. expect(result).toBeDefined()) rather than a specific wrong value.
+   Object merge/assign/extend: test with NESTED objects to document whether the merge is shallow or deep — assert the actual behavior of the source, not assumed behavior.
+   Falsy edge cases: for any function that checks nullability or truthy/falsy values, always include 0 and '' as test cases — these are the most commonly missed falsy-but-non-null inputs.
+   Describe coverage: every exported function in ## Functions to Test MUST have at least one describe() block. A function with no describe block is a coverage failure.
+3. Descriptive names: 'should return 404 when patient ID does not exist'.
+4. One describe() per exported function/class.
+5. Never use Date.now(), Math.random(), or any non-deterministic values.
+
+### Mocking
+6. Mock ONLY side-effecting deps. NEVER mock pure utility libraries — they return undefined when mocked, silently breaking all assertions.
+   MUST mock: fetch/axios/got/node-fetch, Prisma/TypeORM/Mongoose/pg, fs/fs.promises, AWS SDK/Stripe/Twilio/SendGrid, faker/uuid/crypto.randomUUID.
+   NEVER mock: lodash, lodash/fp, ramda, date-fns, date-fns-tz, moment, dayjs, dinero.js, mathjs, decimal.js, big.js.
+   NEVER mock local model/type/enum/constants files — TypeScript erases them at compile time, mocking removes enum values.
+   OVERRIDE: If ## Existing Test Style mocks one of these, follow that project pattern.
+7. faker MUST be mocked (non-deterministic). Use vi.spyOn(faker.finance,'amount').mockReturnValue('1000') or vi.mock('@faker-js/faker', () => ({faker:{...}})). Never vi.mock('@faker-js/faker') with no factory.
+8. Never declare the same vi.mock()/jest.mock() more than once for the same module.
+9. Mock hygiene: add beforeEach(() => jest.clearAllMocks()) to EVERY describe block that uses jest.fn() or global mocks. OMIT it from blocks with no mocks.
+10. Never call jest.mock()/vi.mock() inside it()/test() — jest hoists them. Declare at top level, vary per test with mockReturnValue().
+11. Never use \`delete global.fetch\` — use jest.restoreAllMocks() instead. When mocking browser globals (fetch, localStorage, navigator, window properties), always cast to any first: \`(globalThis as any).fetch = jest.fn()\` — NEVER use \`(global as any)\` (requires @types/node) and NEVER assign directly to \`global.fetch\` (TypeScript strict lib types reject direct assignment).
+
+### Type Safety
+12. Generic constraints: ALL args must satisfy the constraint. If two args share generic T, they must be structurally compatible. Never add new keys not in base type — including at nested levels. Never pass undefined/null as a generic type argument. Nested objects must match T's shape exactly — no extra keys, no missing required fields.
+   FORBIDDEN — nested object incompatibility:
+     const target = { a: { b: 1 } };
+     const source = { a: { c: 2 } }; // 'c' does not exist on target.a — TS2345
+     deepMerge(target, source);
+   CORRECT — match nested shape exactly (same key, different value):
+     const source = { a: { b: 2 } };
+   OR use flat objects with no nesting:
+     const target = { x: 1 }; const source = { x: 2, y: 3 };
+13. Partial mocks: use \`const x = { id:'1' } as unknown as ComplexType\` — never \`const x: ComplexType = { id:'1' }\` (missing required fields = compile error outside it() blocks). \`Partial<T>\` must contain only keys that exist on T — never invent extra keys. Use \`as unknown as Type\` when uncertain about shape compliance.
+14. RUNTIME vs COMPILE-TIME: TS generics are erased at runtime. Never .toThrow() just because input violates a TS type — only when source has explicit: throw new Error(...).
+15. Never invent import paths. If a type isn't in ## Imports, use \`any\`.
+
+### Assertions
+16. Strong assertions: toBe(exact)/toEqual({...})/toStrictEqual([...]). Avoid toBeTruthy/toBeDefined/not.toBeNull unless testing a boolean type guard.
+17. Floats: use toBeCloseTo(). NaN: use toBeNaN() — never toBe(NaN).
+18. Math verification: calculate expected value step-by-step in a comment, then assert.
+
+### Structure
+19. ALL beforeEach/afterEach/beforeAll/afterAll MUST be inside a describe() block — never at file top level.
+20. Method names: read actual source — never assume inherited method names. Use exactly what's defined.
+21. Retry logic: read loop bounds carefully (0-indexed vs 1-indexed). toHaveBeenCalledTimes must match EXACT call count.
+22. Zero-param functions: call as fn(), never fn(null). Never omit required args.
+
+### Framework Globals
+23. VITEST: describe/it/test/expect/vi/beforeEach are NOT globals — MUST import: import { describe, it, expect, vi, beforeEach } from 'vitest'.
+    JEST: describe/it/test/expect/jest/beforeEach ARE globals — NEVER import them. NEVER add \`import { jest } from '@jest/globals'\` unless @jest/globals is explicitly listed in the project's package.json — standard jest projects provide jest as a global automatically.
+    MOCHA: describe/it/beforeEach are globals. Use chai: import { expect } from 'chai'. Use sinon for mocks. NEVER use jest.fn()/vi.fn().
+    JASMINE: describe/it/beforeEach/expect are globals. Use jasmine.createSpy(). NEVER use jest.fn()/vi.fn().`;
 
   const extras: string[] = [];
   if (isFrontend) {
-    extras.push('Frontend file: test rendered output and user interactions, not component internals. Use the appropriate testing library for the framework detected in the test pattern sample.');
-    extras.push('RTL IMPORTS: When using React Testing Library, ALWAYS import every utility you use:\n' +
-      '  import { render, screen, waitFor, act } from \'@testing-library/react\';\n' +
-      '  import userEvent from \'@testing-library/user-event\';\n' +
-      'Never use render, screen, userEvent, waitFor, or act without importing them. Missing RTL imports are the #1 cause of frontend test failures.');
+    extras.push("Frontend: test rendered output and user interactions, not internals. RTL imports MANDATORY — import { render, screen, waitFor, act } from '@testing-library/react'; import userEvent from '@testing-library/user-event'. Never use these without importing.");
   }
-  if (isNestJS) {
-    extras.push('NestJS file: use Test.createTestingModule() for all service tests. Mock providers using { provide: ServiceName, useValue: mockObject }. Never mock @nestjs/common directly — it breaks the DI container.');
-  }
-  if (isNextJS) {
-    extras.push('Next.js file: mock next/router, next/navigation, and next/headers at the module boundary. Do not test Next.js internals.');
-  }
-  if (isGraphQL) {
-    extras.push('GraphQL file: test resolver logic directly. Mock the data sources and services the resolver calls. Do not test the GraphQL layer itself.');
-  }
-  if (isPrisma) {
-    extras.push('Prisma file: mock @prisma/client at the DB boundary. Never call the real database. Use jest.mock(\'@prisma/client\').');
-  }
+  if (isNestJS)  { extras.push('NestJS: use Test.createTestingModule(). Mock with { provide: ServiceName, useValue: mockObject }. Never mock @nestjs/common.'); }
+  if (isNextJS)  { extras.push('Next.js: mock next/router, next/navigation, next/headers at module boundary. Never test Next.js internals.'); }
+  if (isGraphQL) { extras.push('GraphQL: test resolver logic directly. Mock data sources. Never test the GraphQL layer itself.'); }
+  if (isPrisma)  { extras.push('Prisma: mock @prisma/client at DB boundary. Never call real database.'); }
 
   if (extras.length === 0) { return base; }
   return base + '\n\nProject-specific rules:\n' + extras.map(e => `- ${e}`).join('\n');
@@ -175,7 +195,7 @@ function buildFileSection(ctx: SilentSpecContext): string {
 
   if (fileContent.length > MAX_FILE_CHARS) {
     content = fileContent.slice(0, MAX_FILE_CHARS);
-    note = ' (truncated at 32000 chars)';
+    note = ` (truncated at ${MAX_FILE_CHARS} chars — function signatures for truncated functions are provided separately below)`;
   }
 
   const importNote = specPath
@@ -193,18 +213,61 @@ function buildFileSection(ctx: SilentSpecContext): string {
   ].filter(Boolean).join('\n');
 }
 
-function buildFunctionSection(ctx: SilentSpecContext): string {
-  const visibleContent = ctx.fileContent.slice(0, MAX_FILE_CHARS);
-  const isVisible = (fn: string) => new RegExp(`\\b${fn}\\b`).test(visibleContent);
+// Extracts signatures for functions that fall outside the MAX_FILE_CHARS window.
+// This ensures the AI always has the parameter types and return type for every
+// function it needs to test, even on large files where the full source is truncated.
+// For functions visible in the source window, signatures are redundant — skip them.
+function buildSignatureSection(ctx: SilentSpecContext): string {
+  const { fileContent } = ctx;
+  // Use workList when set (batch mode) — only extract signatures for the functions
+  // we're actually generating tests for in this run, not the full export list.
+  const targetFns = ctx.workList ?? ctx.exportedFunctions;
 
-  const visibleFns = ctx.exportedFunctions.filter(fn => isVisible(fn));
-  const truncatedFns = ctx.exportedFunctions.filter(fn => !isVisible(fn));
+  // Only extract signatures for functions NOT visible in the source window
+  const visibleContent = fileContent.slice(0, MAX_FILE_CHARS);
+  const truncatedFns = targetFns.filter(fn => {
+    const escaped = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return !new RegExp(`\\b${escaped}\\b`).test(visibleContent);
+  });
+
+  if (truncatedFns.length === 0) { return ''; }
+
+  const signatures = truncatedFns.map(fn => extractSignature(fileContent, fn));
+
+  return [
+    '## Signatures for Functions Outside Source Window',
+    'These functions exist in the source file beyond the visible window.',
+    'Their signatures are provided here so you can write correct tests.',
+    'Use the same import, types, and patterns as the visible source above.',
+    '```typescript',
+    ...signatures,
+    '```',
+  ].join('\n');
+}
+
+function buildFunctionSection(ctx: SilentSpecContext): string {
+  // Use workList when set (batch mode) — tell the AI to generate tests only for
+  // the current batch, not all 41+ exports. buildImportSection uses exportedFunctions
+  // (full list) so the import statement stays correct regardless of batch size.
+  const targetFns = ctx.workList ?? ctx.exportedFunctions;
+
+  const visibleContent = ctx.fileContent.slice(0, MAX_FILE_CHARS);
+  const isVisible = (fn: string) => {
+    const escaped = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped}\\b`).test(visibleContent);
+  };
+
+  const visibleFns = targetFns.filter(fn => isVisible(fn));
+  const truncatedFns = targetFns.filter(fn => !isVisible(fn));
 
   const list = visibleFns.map(f => `- ${f}`).join('\n');
   let result = `## Functions to Test\nGenerate tests for ALL of these — do not skip any:\n${list}`;
 
   if (truncatedFns.length > 0) {
-    result += `\n\n// [SS-PARTIAL] Remaining functions (truncated from view): ${truncatedFns.join(', ')}`;
+    result += `\n\nThese functions are outside the source window but their signatures`;
+    result += `\nare provided in ## Signatures for Functions Outside Source Window above.`;
+    result += `\nGenerate tests for them using those signatures:\n`;
+    result += truncatedFns.map(f => `- ${f}`).join('\n');
   }
 
   return result;
@@ -212,15 +275,20 @@ function buildFunctionSection(ctx: SilentSpecContext): string {
 
 function buildFrameworkSection(ctx: SilentSpecContext): string {
   const { framework, isFrontend } = ctx;
-  const mockFn = framework === 'vitest' ? 'vi.mock' : 'jest.mock';
-
-  let line = `Use ${framework}. Mock external dependencies with ${mockFn}().`;
+  let line: string;
 
   if (framework === 'vitest') {
-    line += ' Import test utilities from \'vitest\': import { describe, it, expect, vi } from \'vitest\'.';
+    line = `Use vitest. Mock with vi.mock(). Import ALL test utilities explicitly: import { describe, it, expect, vi, beforeEach } from 'vitest'. Never assume globals.`;
+  } else if (framework === 'mocha') {
+    line = `Use mocha + chai. describe/it/beforeEach/afterEach are globals. import { expect } from 'chai'. Use sinon for mocks: import sinon from 'sinon'. Restore in afterEach with sinon.restore(). Never use jest.mock()/vi.mock()/jest.fn()/vi.fn().`;
+  } else if (framework === 'jasmine') {
+    line = `Use jasmine. describe/it/beforeEach/afterEach/expect are globals. Use jasmine.createSpy() for mocks. Never use jest.mock()/vi.mock()/jest.fn()/vi.fn().`;
+  } else {
+    line = `Use jest. Mock with jest.mock().`;
   }
+
   if (isFrontend) {
-    line += ' Import render and screen from \'@testing-library/react\'. Only use userEvent if you also import it explicitly: import userEvent from \'@testing-library/user-event\'. Only use jest-dom matchers like toBeInTheDocument() or toHaveTextContent() if @testing-library/jest-dom is listed in the provided dependencies.';
+    line += " Import render/screen from @testing-library/react. Import userEvent from @testing-library/user-event explicitly. Only use jest-dom matchers if @testing-library/jest-dom is in dependencies.";
   }
 
   return `## Testing Framework\n${line}`;
@@ -232,7 +300,8 @@ function buildPatternSection(sample: string | null): string {
   }
   return [
     '## Existing Test Style (Match This Exactly)',
-    'The project already has tests. Match their style precisely — same import patterns, same describe/it naming, same mock patterns.',
+    'Match style precisely — same imports, describe/it naming, mock patterns.',
+    'IMPORTANT: If this sample mocks any utility library (lodash, date-fns, etc.), follow that pattern even if it contradicts Rule 6.',
     '```typescript',
     sample,
     '```',
@@ -240,10 +309,19 @@ function buildPatternSection(sample: string | null): string {
 }
 
 function buildMockSection(mockHints: SilentSpecContext['mockHints']): string {
-  if (mockHints.length === 0) {
+  const filteredHints = mockHints.filter(h => {
+    const root = getRootPackage(h.source);
+    if (FORBIDDEN_MOCK_LIBS.includes(root)) { return false; }
+    // Never suggest mocking local model/type/enum/constants files —
+    // TS erases them at compile time, mocking removes enum values.
+    if (isLocalModelMockPath(h.source)) { return false; }
+    return true;
+  });
+
+  if (filteredHints.length === 0) {
     return '## Mocking\nNo external dependencies detected. No mocks needed.';
   }
-  const strategies = mockHints.map(h => h.mockStrategy).join('\n');
+  const strategies = filteredHints.map(h => h.mockStrategy).join('\n');
   return `## Required Mocks\nAdd these before any describe() blocks:\n${strategies}`;
 }
 
@@ -259,109 +337,77 @@ function buildProjectTypeSection(ctx: SilentSpecContext): string {
   return '## Project Type\n' + flags.map(f => `- ${f}`).join('\n');
 }
 
+function buildBoundaryValueRules(): string {
+  return [
+    '## Boundary Value Rules',
+    '- Use realistic boundary values only. Do not use inputs that cause language-level overflow, underflow, or undefined behavior.',
+    '- For numeric precision functions, do not exceed the JavaScript float precision limit (Math.pow(10, N) where N > 292 produces Infinity — use N ≤ 15 for safe float tests).',
+    '- For string functions, do not use strings longer than 10,000 characters unless the function explicitly handles large input.',
+    '- For array functions, do not use arrays longer than 10,000 elements unless the function explicitly handles large collections.',
+    '- For recursive or iterative functions, do not use inputs that would cause stack overflow or infinite loops.',
+    '- Always assert the correct expected value for the input you chose. If the expected value is NaN, assert toBeNaN(). If it throws, assert expect(() => fn()).toThrow(). Never assert Infinity when the function is not documented to return Infinity.',
+  ].join('\n');
+}
+
+function buildFetchMockingSection(): string {
+  return [
+    '## Fetch Mocking',
+    '- Use globalThis instead of global when mocking fetch:',
+    '  (globalThis as any).fetch = jest.fn().mockResolvedValue({...})',
+    '- Never use (global as any).fetch — global requires @types/node',
+    '- globalThis works in all environments without extra type packages',
+  ].join('\n');
+}
+
 function buildOutputInstruction(): string {
   return [
     '## Output Format',
-    'Output ONLY the test file content. No markdown code fences. No explanation.',
-    'Start the output with exactly this line:',
-    '// <SS-GENERATED-START>',
-    'End the output with exactly this line:',
-    '// <SS-GENERATED-END>',
-    'Do not include any content before // <SS-GENERATED-START> or after // <SS-GENERATED-END>.',
-    'Import statements go inside the markers — everything goes inside.',
+    'Output ONLY the test file content. No markdown fences. No explanation.',
+    'Start with exactly: // <SS-GENERATED-START>',
+    'End with exactly: // <SS-GENERATED-END>',
+    'Everything (imports, helpers, tests) goes inside the markers.',
+    'Do NOT add attributes to markers — output plain comment lines only.',
     '',
     '## Token Budget',
-    'The response is capped at 4096 tokens.',
-    'If you cannot generate tests for all exported functions within this limit:',
-    '  1. Generate complete, correct tests for as many functions as possible.',
-    '     Prioritize: functions with the most complexity or external dependencies first.',
-    '  2. Add this exact comment as the final line inside the markers:',
-    '     // [SS-PARTIAL] Remaining functions: functionName1, functionName2',
-    '     List every function you did not reach — comma-separated, exact names.',
-    'Never generate incomplete tests to fit more functions.',
-    'A complete test for 3 functions is better than broken stubs for 10.',
+    'Generate COMPLETE, correct tests for the listed functions.',
+    'If token limit is reached before all functions are done:',
+    '  1. Stop cleanly after the last complete test block.',
+    '  2. Do NOT generate incomplete or stub tests.',
+    '  3. End with // <SS-GENERATED-END> immediately after the last complete block.',
+    'The system auto-resumes generation for remaining functions on the next run.',
+    'A complete test for 3 functions > broken stubs for 10.',
   ].join('\n');
 }
 
 function buildSelfCorrectionBlock(): string {
   return [
-    '## Self-Review (Complete Before Outputting)',
-    'After generating the tests, review them against every rule below:',
+    '## Pre-Output Self-Review Checklist',
+    'Complete ALL checks before outputting:',
     '',
-    '1. METHOD AUDIT: For every method call on any class instance or mock,',
-    '   verify the method name exists in the SOURCE CODE provided above.',
-    '   - Check the actual class definition — not what you assume it inherits.',
-    '   - If a class overrides inherited behavior with a custom method,',
-    '     use the custom method name, never the inherited one.',
-    '   - Remove or rewrite any test that calls a method not defined in the source.',
+    '1. METHOD AUDIT: Every method call on a class/mock must exist in the SOURCE CODE. Remove tests calling non-existent methods.',
+    '2. FLAKY PATTERNS: Remove setTimeout/setInterval, Date.now(), new Date(), Math.random() from test bodies.',
+    '3. MOCK USAGE: Every mock in Required Mocks is used in a test or beforeEach.',
+    '4. IMPORT COVERAGE: Every symbol used is imported. VITEST: import { describe,it,expect,vi,beforeEach } from "vitest". JEST: never import globals — and never add `import { jest } from \'@jest/globals\'` unless it is listed in package.json dependencies.',
+    '5. ERROR PATHS: At least one error/failure test per exported function.',
+    '6. MARKERS: Output starts with // <SS-GENERATED-START> and ends with // <SS-GENERATED-END>. No attributes on markers.',
+    '7. IMPORT MATCH: Import statement is IDENTICAL to ## CRITICAL — Import Statement above.',
+    '8. FETCH MOCK: Never delete global.fetch. Use jest.restoreAllMocks() in afterEach. Assign browser globals with `(globalThis as any).property = ...` — never `(global as any)` (requires @types/node) and never `global.property = ...` (TS strict lib types reject direct assignment).',
+    '9. MOCK ISOLATION: Every describe() using jest.fn()/global mocks has beforeEach(() => jest.clearAllMocks()). Blocks with no mocks do NOT have it.',
+    '10. GENERIC TYPES: All args satisfy generic constraints. No new keys at any nesting level beyond base type. Never pass undefined/null as a generic type arg. Partial<T> only contains keys that exist on T. Nested objects must share the same key names — `{ a: { c: 2 } }` is NOT compatible with `{ a: { b: 1 } }` (TS2345). Use matching keys or flat objects instead.\n    When testing ANY generic function where two parameters share the same type T, follow this 3-step derivation:\n      STEP 1: Write target first:  const target = { a: 1, b: 2 }\n      STEP 2: Derive source from target\'s type:  const source: Partial<typeof target> = { a: 3 }\n      STEP 3: NEVER introduce keys in source that don\'t exist in target — at ANY nesting level.\n    If you cannot derive source from target\'s type without new keys, simplify target to fewer keys.',
+    '11. THROW AUDIT + EDGE CASE BEHAVIOR: .toThrow() only when source has explicit throw new Error(...). Never for TS type violations. Broader: never assume how the source handles any edge case input (negative numbers, zero, empty string, undefined) unless there is an explicit condition or guard — trace the code path to derive the expected value. If uncertain, use a weaker assertion.',
+    '12. SIGNATURES: Arg count/types match function signature. Zero-param = fn(), never fn(null). Never omit required args.',
+    '13. MOCK HOISTING: No jest.mock()/vi.mock() inside it()/test(). All at top level.',
+    '14. FLOAT/NaN: Float results → toBeCloseTo(). NaN → toBeNaN(), never toBe(NaN).',
+    '15. LIFECYCLE SCOPE: All beforeEach/afterEach/beforeAll/afterAll inside a describe() block. None at file top level.',
+    '16. PARTIAL MOCKS: const x = {...} as unknown as Type. Never const x: Type = {...} with missing fields. Use `as unknown as Type` whenever uncertain about shape compliance.',
+    '17. DUPLICATE MOCKS: Each module mocked at most once. Remove duplicates, keep most complete factory.',
+    '18. UTILITY MOCK AUDIT: Remove any mock for lodash/ramda/date-fns/dinero.js/mathjs etc. Keep faker mocks. Keep if shown in Existing Test Style.',
+    '19. LOCAL MODEL MOCK AUDIT: Remove mocks for models/types/enums/constants/DTOs — TS erases them, mocking breaks enum values.',
+    '20. ASSERTION QUALITY: Replace toBeTruthy/toBeDefined/not.toBeNull with specific values (toBe/toEqual/toStrictEqual) where value is known.',
+    '21. MATH VERIFICATION: Show step-by-step calculation in comment before numerical assertion.',
+    '22. DESCRIBE ENCAPSULATION: No top-level lifecycle hooks. All inside describe().',
     '',
-    '2. FLAKY PATTERN REMOVAL:',
-    '   - Remove setTimeout/setInterval in test bodies',
-    '   - Remove Date.now() or new Date() without mocking',
-    '   - Remove Math.random() or non-deterministic values',
-    '',
-    '3. Verify every mock in Required Mocks is actually used in a test or beforeEach.',
-    '',
-    '4. Verify every import in the source file is either mocked or is a pure utility.',
-    '',
-    '5. Confirm at least one error/failure test per exported function.',
-    '',
-    '6. IMPORT COMPLETENESS: Every symbol used in the test file must be imported.',
-    '   FRONTEND: render, screen, fireEvent, waitFor, act → @testing-library/react',
-    '   FRONTEND: userEvent → @testing-library/user-event',
-    '   FRONTEND: jest-dom matchers → @testing-library/jest-dom',
-    '   NESTJS: Test, TestingModule → @nestjs/testing',
-    '   PRISMA: verify jest.mock(\'@prisma/client\') is present',
-    '   EXPRESS: Request, Response types → express',
-    '   JEST GLOBALS: describe, it, test, expect, jest, beforeEach, afterEach,',
-    '     beforeAll, afterAll are GLOBALS — never import them.',
-    '   NEVER write: import jest from "jest-mock" — jest is always a global.',
-    '',
-    '7. Confirm output starts with // <SS-GENERATED-START> and ends with // <SS-GENERATED-END>.',
-    '',
-    '8. SS-PARTIAL check: if you added // [SS-PARTIAL], confirm it:',
-    '   - Format: // [SS-PARTIAL] Remaining functions: name1, name2',
-    '   - Lists every function without a describe() block',
-    '   - Is the last line before // <SS-GENERATED-END>',
-    '',
-    '9. IMPORT VERIFICATION: Your import statement must be IDENTICAL to the',
-    '   "CRITICAL — Import Statement" section above. Fix if different.',
-    '',
-    '10. FETCH MOCKING: Never use `delete global.fetch`.',
-    '    Use jest.restoreAllMocks() or jest.resetAllMocks() in afterEach.',
-    '    Mock fetch with: global.fetch = jest.fn() as jest.Mock; in beforeEach.',
-    '',
-    '11. MOCK ISOLATION: For every describe() block using jest.fn() or global mocks,',
-    '    confirm it has beforeEach(() => jest.clearAllMocks()).',
-    '    Do NOT add it to describe blocks with no mocks — that is noise.',
-    '',
-    '12. GENERIC TYPE AUDIT: For every generic function call, verify all arguments',
-    '    satisfy the generic constraint. If source is Partial<T>, confirm the object',
-    '    only contains keys present in the base type — including nested objects.',
-    '    NESTED CHECK: At every level of nesting, verify the keys match the base type.',
-    '    Any new key introduced at any nesting level is a type violation — fix before outputting.',
-    '',
-    '13. ERROR PATH AUDIT: Before writing .toThrow() or rejects.toThrow(),',
-    '    verify the function actually throws for that input by reading the source.',
-    '    Functions that NEVER throw: String(), Number(), spread/merge, type guards.',
-    '    Only write .toThrow() when source has explicit: throw new Error(...)',
-    '',
-    '14. FUNCTION SIGNATURE AUDIT: Verify argument count and types match the signature.',
-    '    Zero-param functions: call as fn(), never fn(null) or fn("").',
-    '    Never omit required arguments.',
-    '',
-    '15. JEST MOCK HOISTING AUDIT: Verify no jest.mock() calls are inside it() or test().',
-    '    All jest.mock() must be at the TOP LEVEL of the file.',
-    '    To vary behavior per test: use mockReturnValue() inside each test.',
-    '',
-    '16. FLOAT PRECISION AUDIT: For any assertion on a floating point result,',
-    '    replace toBe() with toBeCloseTo().',
-    '    For NaN results, replace toBe(NaN) with toBeNaN().',
-    '',
-    '17. MOCK NECESSITY AUDIT: Only add beforeEach(jest.clearAllMocks) to describe blocks',
-    '    that actually use jest.fn() or mock globals. Remove it from blocks with no mocks.',
-    '',
-    'After completing all 17 checks, output the corrected final test file.',
+    'Output the corrected final test file after completing all 22 checks.',
   ].join('\n');
 }
 
@@ -378,9 +424,8 @@ function buildDependencySection(ctx: SilentSpecContext): string {
 
   return [
     '## Local Dependency Signatures',
-    'These are the actual exported types and function signatures from the',
-    'imported local files. Use these to write correct mocks and assertions',
-    '— do not guess prop names or return types.',
+    'Actual exported types/signatures from imported local files.',
+    'Use these for correct mocks and assertions — do not guess prop names or return types.',
     ...sections,
   ].join('\n\n');
 }
@@ -390,13 +435,16 @@ export function buildPrompt(ctx: SilentSpecContext): string {
     buildInternalTypeSection(ctx),
     buildRole(ctx),
     buildFileSection(ctx),
+    buildSignatureSection(ctx),   // NEW: signatures for functions outside source window
     buildFunctionSection(ctx),
-    buildImportSection(ctx),     // Phase 10 — inject exact import line before framework
+    buildImportSection(ctx),
     buildFrameworkSection(ctx),
     buildPatternSection(ctx.testPatternSample),
     buildMockSection(ctx.mockHints),
     buildProjectTypeSection(ctx),
     buildDependencySection(ctx),
+    buildBoundaryValueRules(),
+    buildFetchMockingSection(),
     buildOutputInstruction(),
     buildSelfCorrectionBlock(),
   ].filter(Boolean).join('\n\n');

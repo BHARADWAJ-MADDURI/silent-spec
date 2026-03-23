@@ -10,8 +10,9 @@ export type TestFramework = 'jest' | 'vitest' | 'mocha' | 'jasmine';
 export interface SilentSpecContext {
   fileContent: string;
   filePath: string;
-  exportedFunctions: string[];
-  exportTypes: Record<string, 'default' | 'named'>; // Phase 10 — added
+  exportedFunctions: string[];    // ALL exports — used for import statement generation
+  workList?: string[];            // Current batch to generate tests for (≤ maxFunctionsPerRun)
+  exportTypes: Record<string, 'default' | 'named'>;
   framework: TestFramework;
   testPatternSample: string | null;
   mockHints: MockHint[];
@@ -23,6 +24,11 @@ export interface SilentSpecContext {
   specPath?: string;
   dependencyContext: DependencyContext[];
   internalTypes: string[];
+  healerMode?: 'full' | 'safe';  // set by preflight check; 'safe' disables test removal
+  typesWarning?: boolean;         // pre-flight detected missing @types package
+  preflightProjectRoot?: string | null; // project root where types are missing
+  installAttempted?: boolean;       // true when auto-install was attempted this session
+  tsconfigTypesWarning?: boolean;   // @types installed but absent from tsconfig types array
 }
 
 export interface MockHint {
@@ -35,19 +41,50 @@ function getWorkspaceRoot(): string | null {
   return folders?.[0]?.uri.fsPath ?? null;
 }
 
-export function detectFramework(workspaceRoot: string): TestFramework {
-  try {
-    const pkgPath = path.join(workspaceRoot, 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+// Walk up from the source file's directory to find the nearest package.json
+// that declares a known test framework. Stops at filesystem root.
+//
+// Why walk from the file and not the workspace root:
+// In monorepos (e.g. bulletproof-react), the workspace root package.json
+// may have no test framework while a nested app package.json has vitest.
+// Walking from the source file finds the most specific package.json first.
+//
+// Continues past package.json files with no known framework — does NOT
+// stop at the first package.json found, only at one that declares a framework.
+export function detectFramework(filePath: string, workspaceRoot: string): TestFramework {
+  let dir = path.dirname(filePath);
+  const fsRoot = path.parse(dir).root;
 
-    if (deps['vitest']) { return 'vitest'; }
-    if (deps['mocha']) { return 'mocha'; }
-    if (deps['jasmine']) { return 'jasmine'; }
-    return 'jest';
-  } catch {
-    return 'jest';
+  while (dir !== fsRoot) {
+    const pkgPath = path.join(dir, 'package.json');
+
+    if (fs.existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+
+        if (deps['vitest'])                                          { return 'vitest'; }
+        if (deps['mocha'])                                           { return 'mocha'; }
+        if (deps['jasmine'])                                         { return 'jasmine'; }
+        if (deps['jest'] || deps['ts-jest'] || deps['babel-jest'])   { return 'jest'; }
+
+        // This package.json has no known test framework —
+        // keep walking up in case a parent package.json does.
+      } catch {
+        // Malformed package.json — keep walking up
+      }
+    }
+
+    // Stop walking if we've reached or passed the workspace root
+    if (dir === workspaceRoot) { break; }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) { break; } // filesystem root guard
+    dir = parent;
   }
+
+  // No framework found in any package.json — default to jest
+  return 'jest';
 }
 
 export function findNearestTestFile(filePath: string): string | null {
@@ -84,7 +121,7 @@ export function findNearestTestFile(filePath: string): string | null {
 export function extractTestPattern(testFilePath: string): string | null {
   try {
     const content = fs.readFileSync(testFilePath, 'utf8');
-    return content.split('\n').slice(0, 60).join('\n');
+    return content.split('\n').slice(0, 30).join('\n');
   } catch {
     return null;
   }
@@ -94,7 +131,23 @@ export function buildMockHints(
   imports: ImportInfo[],
   framework: TestFramework
 ): MockHint[] {
-  const mockFn = framework === 'vitest' ? 'vi.mock' : 'jest.mock';
+  const mockFn = framework === 'vitest'
+    ? 'vi.mock'
+    : (framework === 'mocha' || framework === 'jasmine')
+      ? null  // mocha/jasmine have no standard mock function — use sinon or proxyquire
+      : 'jest.mock';
+
+  // For mocha/jasmine, skip module-level mock hints entirely.
+  // These frameworks use sinon stubs/spies or proxyquire — not vi.mock/jest.mock.
+  // The AI will infer the correct mocking approach from the test pattern sample.
+  if (!mockFn) {
+    return imports
+      .filter(imp => !imp.isLocal)
+      .map(imp => ({
+        source: imp.source,
+        mockStrategy: `// ${imp.source} — use sinon.stub() or proxyquire for mocha/jasmine mocking`,
+      }));
+  }
 
   return imports.map(imp => {
     const { source, isLocal } = imp;
@@ -167,15 +220,15 @@ function detectProjectType(
   const isFrontend = frontendExts.includes(ext) ||
     imports.some(i => frontendImports.includes(i.source));
 
-  const isNestJS = imports.some(i => i.source.startsWith('@nestjs/'));
-  const isNextJS = imports.some(i => i.source === 'next' || i.source.startsWith('next/'));
+  const isNestJS  = imports.some(i => i.source.startsWith('@nestjs/'));
+  const isNextJS  = imports.some(i => i.source === 'next' || i.source.startsWith('next/'));
 
   const graphqlPackages = [
     'graphql', '@apollo/client', '@apollo/server',
     'graphql-request', 'urql', 'relay-runtime', 'type-graphql'
   ];
   const isGraphQL = imports.some(i => graphqlPackages.includes(i.source));
-  const isPrisma = imports.some(i =>
+  const isPrisma  = imports.some(i =>
     i.source === '@prisma/client' || i.source.includes('prisma')
   );
 
@@ -187,24 +240,31 @@ export function extractContext(
   exportedFunctions: string[],
   imports: ImportInfo[],
   log: (msg: string) => void,
-  exportTypes: Record<string, 'default' | 'named'> = {} // Phase 10 — added
+  exportTypes: Record<string, 'default' | 'named'> = {}
 ): SilentSpecContext {
 
   const workspaceRoot = getWorkspaceRoot() ?? path.dirname(filePath);
   const fileContent = fs.readFileSync(filePath, 'utf8');
 
-  const framework = detectFramework(workspaceRoot);
-  log(`Framework detected: ${framework}`);
+  // Walk up from source file to find nearest package.json with a test framework.
+  // Passes workspaceRoot as upper bound to avoid scanning outside the project.
+  const framework = detectFramework(filePath, workspaceRoot);
+  if (framework === 'jest') {
+    // Log whether this was a definitive jest detection or a fallback
+    log(`Framework detected: jest`);
+  } else {
+    log(`Framework detected: ${framework}`);
+  }
 
   const { isFrontend, isNestJS, isNextJS, isGraphQL, isPrisma } =
     detectProjectType(filePath, imports);
 
   const projectFlags = [
     isFrontend && 'frontend',
-    isNestJS && 'nestjs',
-    isNextJS && 'nextjs',
-    isGraphQL && 'graphql',
-    isPrisma && 'prisma',
+    isNestJS   && 'nestjs',
+    isNextJS   && 'nextjs',
+    isGraphQL  && 'graphql',
+    isPrisma   && 'prisma',
   ].filter(Boolean).join(', ') || 'standard';
   log(`Project type: ${projectFlags}`);
 
@@ -224,7 +284,7 @@ export function extractContext(
     fileContent,
     filePath,
     exportedFunctions,
-    exportTypes,       
+    exportTypes,
     framework,
     testPatternSample,
     mockHints,
@@ -234,6 +294,6 @@ export function extractContext(
     isGraphQL,
     isPrisma,
     dependencyContext,
-    internalTypes: [], 
+    internalTypes: [],
   };
 }

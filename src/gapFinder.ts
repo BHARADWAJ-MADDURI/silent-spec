@@ -1,73 +1,43 @@
 import * as vscode from 'vscode';
 import { analyzeFile } from './astAnalyzer';
-import { extractContext } from './contextExtractor';
-import { buildPrompt } from './promptBuilder';
+import { extractContext, SilentSpecContext } from './contextExtractor';
 import { resolveSpecPath } from './fileWriter';
-import { detectTestedFunctions } from './utils/testScanner';
+import {
+  readMarker,
+  reconcile,
+  computeWorkList,
+  updateMarkerOnly,
+  DEFAULT_MAX_FUNCTIONS_PER_RUN,
+} from './utils/markerManager';
 
-function buildGapPrompt(
-  filePath: string,
-  gaps: string[],
-  testedFunctions: string[],
-  exportTypes: Record<string, 'default' | 'named'>,
-  log: (msg: string) => void
-): string {
-  const result = analyzeFile(filePath, log);
-  if (!result.isTestable) {
-    throw new Error(`Gap Finder: not testable — ${result.skipReason}`);
-  }
-
-  const ctx = extractContext(
-    filePath,
-    gaps,
-    result.imports,
-    log,
-    exportTypes 
-  );
-
-  const basePrompt = buildPrompt(ctx);
-
-  const alreadyTestedNote = testedFunctions.length > 0
-    ? [
-      '## Already Tested — Do Not Regenerate',
-      'These functions already have tests in the spec file.',
-      'Do NOT generate tests for them under any circumstance:',
-      ...testedFunctions.map(f => `- ${f}`),
-      '',
-      'Generate ONLY for the functions listed in ## Functions to Test above.',
-    ].join('\n')
-    : '';
-
-  return alreadyTestedNote
-    ? `${basePrompt}\n\n${alreadyTestedNote}`
-    : basePrompt;
-}
 
 export async function runGapFinder(
   log: (msg: string) => void,
   onPromptReady: (
-    prompt: string,
+    ctx: SilentSpecContext,
     filePath: string,
     log: (msg: string) => void,
     abortSignal: AbortSignal,
-    isMerge: boolean,
-    exportedFunctions: string[],                       
-    exportTypes: Record<string, 'default' | 'named'>   
-  ) => Promise<void>
+    exportedFunctions: string[],
+    exportTypes: Record<string, 'default' | 'named'>
+  ) => Promise<void>,
+  filePathOverride?: string
 ): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor) {
-    vscode.window.showWarningMessage('SilentSpec: No active file open');
-    return;
-  }
+  let filePath: string;
 
-  const filePath = editor.document.uri.fsPath;
-
-  if (/\.(test|spec)\.[tj]sx?$/.test(filePath)) {
-    vscode.window.showWarningMessage(
-      'SilentSpec: Cannot run Gap Finder on a test file'
-    );
-    return;
+  if (filePathOverride) {
+    filePath = filePathOverride;
+  } else {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showWarningMessage('SilentSpec: No active file open');
+      return;
+    }
+    filePath = editor.document.uri.fsPath;
+    if (/\.(test|spec)\.[tj]sx?$/.test(filePath)) {
+      vscode.window.showWarningMessage('SilentSpec: Cannot run Gap Finder on a test file');
+      return;
+    }
   }
 
   await vscode.window.withProgress({
@@ -86,73 +56,126 @@ export async function runGapFinder(
 
     log(`Gap Finder: ${result.exportedFunctions.length} function(s) detected`);
 
+    // Read marker from existing spec
     const specPath = await resolveSpecPath(filePath);
-    let gaps = result.exportedFunctions;
-    let testedFunctions: string[] = [];
-    let isMerge = false;
+    let existingMarker = null;
 
     try {
-      const specBytes = await vscode.workspace.fs.readFile(
-        vscode.Uri.file(specPath)
-      );
-      const specContent = Buffer.from(specBytes).toString('utf8');
-
-      testedFunctions = detectTestedFunctions(
-        specContent,
-        result.exportedFunctions
-      );
-      log(`Gap Finder: tested — [${testedFunctions.join(', ')}]`);
-
-      gaps = result.exportedFunctions.filter(
-        fn => !testedFunctions.includes(fn)
-      );
-      isMerge = true;
-
+      const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+      const { marker } = readMarker(Buffer.from(bytes).toString('utf8'));
+      existingMarker = marker;
+      if (marker) {
+        log(`Gap Finder: marker read — covered: [${marker.covered.join(', ')}] pending: [${marker.pending.join(', ')}]`);
+      } else {
+        log('Gap Finder: no marker found — treating all functions as gaps');
+      }
     } catch {
       log('Gap Finder: no spec found — full generation');
     }
 
-    if (gaps.length === 0) {
+    // Reconcile marker against current exports and compute work list
+    const reconciled = reconcile(existingMarker, result.exportedFunctions);
+
+    if (reconciled.dropped.length > 0) {
+      log(`Gap Finder: dropped stale entries — [${reconciled.dropped.join(', ')}]`);
+    }
+
+    const maxPerRun = vscode.workspace
+      .getConfiguration('silentspec')
+      .get<number>('maxFunctionsPerRun', DEFAULT_MAX_FUNCTIONS_PER_RUN);
+
+    const workList = computeWorkList(reconciled, maxPerRun);
+
+    if (workList.length === 0) {
+      vscode.window.showInformationMessage('SilentSpec: All functions covered ✓');
+      log('Gap Finder: all functions covered — nothing to generate');
+      return;
+    }
+
+    const pendingCount = reconciled.pending.filter(fn => workList.includes(fn)).length;
+    const newCount     = workList.length - pendingCount;
+    log(`Gap Finder: work list — [${workList.join(', ')}] (${pendingCount} resuming, ${newCount} new)`);
+
+    if (pendingCount > 0) {
       vscode.window.showInformationMessage(
-        'SilentSpec: No gaps found — all exports have tests ✓'
+        `SilentSpec: Resuming ${pendingCount} pending + ${newCount} new functions...`
       );
-      return;
+    } else {
+      const display = workList.length <= 3 ? workList.join(', ') : `${workList.length} functions`;
+      vscode.window.showInformationMessage(`SilentSpec: Generating tests for ${display}...`);
     }
 
-    log(`Gap Finder: gaps — [${gaps.join(', ')}]`);
+    // Build ctx with the work list — the extension.ts findGaps callback ignores
+    // this ctx and calls runOneGapBatch directly (which builds its own prompt),
+    // but we pass a valid ctx to satisfy the interface contract.
+    const gapCtx = extractContext(filePath, result.exportedFunctions, result.imports, log, result.exportTypes);
+    gapCtx.specPath = specPath;
+    gapCtx.workList = workList;
+    gapCtx.internalTypes = result.internalTypes;
 
-    const gapDisplay = gaps.length <= 3
-      ? gaps.join(', ')
-      : `${gaps.length} functions`;
-    vscode.window.showInformationMessage(
-      `SilentSpec: Generating tests for ${gapDisplay}...`
-    );
-
-    let prompt: string;
-    try {
-      prompt = buildGapPrompt(
-        filePath,
-        gaps,
-        testedFunctions,
-        result.exportTypes,   
-        log
-      );
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log(`Gap Finder: prompt build failed — ${msg}`);
-      vscode.window.showWarningMessage(`SilentSpec: Gap Finder failed — ${msg}`);
-      return;
-    }
+    // Per-function retry counter — scoped to this invocation, max 2 retries per function.
+    const retryCount = new Map<string, number>();
+    const MAX_GAP_RETRIES = 2;
 
     const controller = new AbortController();
     await onPromptReady(
-      prompt,
+      gapCtx,
       filePath,
       log,
       controller.signal,
-      isMerge,
-      result.exportedFunctions,  
-      result.exportTypes       
+      result.exportedFunctions,
+      result.exportTypes
     );
+
+    // Post-batch coverage validation — re-read spec marker from disk (authoritative).
+    try {
+      const updatedBytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+      const updatedSpecContent = Buffer.from(updatedBytes).toString('utf8');
+      const { marker: updatedMarker } = readMarker(updatedSpecContent);
+      const stillPending = updatedMarker?.pending ?? [];
+
+      // Authoritative coverage gap check: AST export list vs marker.covered.
+      // Catches functions that were outside the batch window entirely — they never
+      // appear in marker.pending because they were never in the work list.
+      if (updatedMarker) {
+        const trulyMissing = result.exportedFunctions.filter(
+          f => !updatedMarker.covered.includes(f)
+        );
+        if (trulyMissing.length > 0) {
+          log(`Coverage gap detected: [${trulyMissing.join(', ')}] not in spec — queuing for Gap Finder`);
+          const newPending = [...new Set([...stillPending, ...trulyMissing])];
+          const patched = updateMarkerOnly(updatedSpecContent, {
+            version: updatedMarker.version,
+            covered: updatedMarker.covered,
+            pending: newPending,
+          });
+          await vscode.workspace.fs.writeFile(
+            vscode.Uri.file(specPath),
+            Buffer.from(patched, 'utf8')
+          );
+        }
+      }
+
+      if (stillPending.length > 0) {
+        log(`Coverage gap: still pending after batch — [${stillPending.join(', ')}]`);
+
+        for (const fn of stillPending) {
+          retryCount.set(fn, (retryCount.get(fn) ?? 0) + 1);
+        }
+
+        const cappedFns = stillPending.filter(fn => (retryCount.get(fn) ?? 0) >= MAX_GAP_RETRIES);
+        const retryableFns = stillPending.filter(fn => (retryCount.get(fn) ?? 0) < MAX_GAP_RETRIES);
+
+        if (cappedFns.length > 0) {
+          log(`Retry cap hit for: [${cappedFns.join(', ')}] — skipping`);
+        }
+
+        if (retryableFns.length === 0) {
+          log('Gap Finder: all pending functions exhausted retry cap — stopping');
+        }
+      }
+    } catch {
+      log('Gap Finder: could not re-read spec for coverage validation');
+    }
   });
 }

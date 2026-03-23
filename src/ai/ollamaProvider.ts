@@ -1,7 +1,14 @@
 import { AIProvider } from './aiProvider';
 
 const OLLAMA_BASE_URL = 'http://localhost:11434';
-const DEFAULT_MODEL   = 'llama3.2'; 
+
+// Model is intentionally empty — resolved at runtime via detectBestModel().
+// Users can override via silentspec.model in VS Code settings.
+// Fallback is used only when Ollama has no models installed at all.
+const FALLBACK_MODEL = 'llama3.2';
+
+// Preferred models in priority order — first available wins.
+// deepseek-coder variants are best for code generation.
 const PREFERRED_MODELS = [
   'deepseek-coder:6.7b',
   'deepseek-coder',
@@ -13,47 +20,58 @@ const PREFERRED_MODELS = [
   'mistral',
   'phi3',
 ];
-const TIMEOUT_MS      = 120_000; // 2 minutes — local models are slower
+
+// Local models are significantly slower than cloud providers.
+// 2 minutes gives headroom for large files on modest hardware.
+const TIMEOUT_MS = 120_000;
 
 async function detectBestModel(): Promise<string> {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
-      signal: AbortSignal.timeout(2000)
+      signal: AbortSignal.timeout(2000),
     });
-    if (!response.ok) { return DEFAULT_MODEL; }
+    if (!response.ok) { return FALLBACK_MODEL; }
+
     const data = await response.json() as { models?: { name: string }[] };
     const available = data.models?.map(m => m.name) ?? [];
+
+    if (available.length === 0) { return FALLBACK_MODEL; }
+
     // Pick first preferred model that's available
     for (const preferred of PREFERRED_MODELS) {
-      if (available.some(m => m.startsWith(preferred.split(':')[0]))) {
-        return available.find(m => m.startsWith(preferred.split(':')[0])) ?? preferred;
-      }
+      const rootName = preferred.split(':')[0];
+      const match = available.find(m => m.startsWith(rootName));
+      if (match) { return match; }
     }
-    // Fall back to first available model
-    return available[0] ?? DEFAULT_MODEL;
+
+    // Fall back to first available model if none of our preferred are present
+    return available[0] ?? FALLBACK_MODEL;
   } catch {
-    return DEFAULT_MODEL;
+    return FALLBACK_MODEL;
   }
 }
 
 export class OllamaProvider implements AIProvider {
-  private readonly model: string;
-
+  private readonly modelOverride: string;
   private resolvedModel: string | null = null;
 
   constructor(model?: string) {
-    this.model = model || DEFAULT_MODEL;
+    this.modelOverride = model || '';
+  }
+
+  getSystemInstructions(): string {
+    return 'Output only valid TypeScript test code. No explanations outside code comments.';
   }
 
   private async getModel(): Promise<string> {
+    // User override takes highest priority
+    if (this.modelOverride) { return this.modelOverride; }
+
+    // Cached resolved model — only detect once per provider instance
     if (this.resolvedModel) { return this.resolvedModel; }
-    if (this.model !== DEFAULT_MODEL) { return this.model; }
+
     this.resolvedModel = await detectBestModel();
     return this.resolvedModel;
-  }
-  
-  getSystemInstructions(): string {
-    return 'Output only valid TypeScript test code. No explanations outside code comments.';
   }
 
   async generateTests(
@@ -64,13 +82,10 @@ export class OllamaProvider implements AIProvider {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    // Forward external abort signal into our controller
-    if (abortSignal) {
-      abortSignal.addEventListener('abort', () => {
-        clearTimeout(timeout);
-        controller.abort();
-      });
-    }
+    abortSignal?.addEventListener('abort', () => {
+      clearTimeout(timeout);
+      controller.abort();
+    });
 
     const model = await this.getModel();
     log(`Ollama: generating with model ${model}...`);
@@ -81,7 +96,7 @@ export class OllamaProvider implements AIProvider {
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          model: model,
+          model,
           prompt,
           stream: false,
           options: {
@@ -112,16 +127,17 @@ export class OllamaProvider implements AIProvider {
       clearTimeout(timeout);
 
       if (error instanceof Error && error.name === 'AbortError') {
-        log('Ollama: request aborted');
+        log('Ollama: request aborted — timeout or re-save cancellation');
         return null;
       }
 
       if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
-        log('Ollama: connection refused — is Ollama running? Run: ollama serve');
+        log('Ollama: connection refused — is Ollama running? Start with: ollama serve');
         return null;
       }
 
-      log(`Ollama: unexpected error — ${error instanceof Error ? error.message : String(error)}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      log(`Ollama: unexpected error — ${msg}`);
       return null;
     }
   }

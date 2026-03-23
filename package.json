@@ -8,7 +8,7 @@
   },
   "categories": [
     "Testing",
-    "AI"
+    "Machine Learning"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -39,6 +39,14 @@
       {
         "command": "silentspec.showStats",
         "title": "SilentSpec: Show Impact Report"
+      },  
+      { 
+        "command": "silentspec.rebuildMarker", 
+        "title": "SilentSpec: Rebuild Marker" 
+      },
+      {
+        "command": "silentspec.explainFailure",
+        "title": "SilentSpec: Explain Failure"
       }
     ],
     "configuration": {
@@ -76,6 +84,16 @@
           "type": "boolean",
           "default": true,
           "description": "Open the generated spec file in a split panel when first created."
+        },
+        "silentspec.aiTimeoutSeconds": { 
+          "type": "number", 
+          "default": 60,
+          "description": "Timeout in seconds for AI provider calls. Increase for slow connections." 
+        },
+        "silentspec.maxFunctionsPerRun": { 
+          "type": "number", 
+          "default": 5,
+          "description": "Hard cap on functions per AI call. Adaptive logic auto-reduces to 5 for files >12k chars (important for GitHub Models free tier). Set to 3-5 for free-tier providers, 8 for paid APIs."
         }
       }
     }
