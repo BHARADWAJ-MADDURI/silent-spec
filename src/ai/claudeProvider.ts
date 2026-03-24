@@ -50,7 +50,7 @@ export class ClaudeProvider implements AIProvider {
           void vscode.commands.executeCommand('silentspec.setApiKey');
         } else if (action === 'Open Anthropic Console') {
           void vscode.env.openExternal(
-            vscode.Uri.parse('https://console.anthropic.com/keys')
+            vscode.Uri.parse('https://console.anthropic.com/settings/keys')
           );
         }
       });

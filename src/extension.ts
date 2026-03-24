@@ -573,8 +573,9 @@ export function activate(context: vscode.ExtensionContext) {
         activeControllers.add(controller);
         abortSignal.addEventListener('abort', () => controller.abort());
 
-        // Computed in try, shown in finally only when activeGenerations reaches 0.
-        let generationStatus: string | null = null;
+        // Default to error so an unhandled throw never leaves the status bar stuck.
+        // Every normal path overwrites this before the finally block runs.
+        let generationStatus = '$(error) SS: Error';
 
         try {
           const AI_TIMEOUT_MS = vscode.workspace.getConfiguration('silentspec').get<number>('aiTimeoutSeconds', 60) * 1000;
@@ -587,6 +588,8 @@ export function activate(context: vscode.ExtensionContext) {
             telemetry.recordFailure(providerName, 'provider_error');
             generationStatus = '$(warning) SS: Failed';
             showProviderFailureToast(filePath, providerName, classifyProviderError(providerErr, false));
+            log(`[SilentSpec] Spec written: no`);
+            log(`[SilentSpec] Reason: provider exception`);
             return;
           }
           if (!raw) {
@@ -597,12 +600,20 @@ export function activate(context: vscode.ExtensionContext) {
             const elapsed = Date.now() - callStartMs;
             const timedOut = elapsed >= AI_TIMEOUT_MS - 500;
             showProviderFailureToast(filePath, providerName, classifyProviderError(null, timedOut));
+            log(`[SilentSpec] Spec written: no`);
+            log(`[SilentSpec] Reason: provider error`);
             return;
           }
 
           // validateResponse handles truncation — null if missing end marker or unbalanced braces
           const validated = validateResponse(raw, log);
-          if (!validated) { telemetry.recordFailure(providerName, 'invalid_response'); generationStatus = '$(warning) SS: Failed'; return; }
+          if (!validated) {
+            telemetry.recordFailure(providerName, 'invalid_response');
+            generationStatus = '$(warning) SS: Failed';
+            log(`[SilentSpec] Spec written: no`);
+            log(`[SilentSpec] Reason: invalid response`);
+            return;
+          }
 
           const fixedValidated = fixImportStatement(validated, filePath, specPath, exportedFunctions, exportTypes, log);
           if (fixedValidated !== validated) { log('Import statement corrected — default/named export mismatch fixed'); }
@@ -632,9 +643,19 @@ export function activate(context: vscode.ExtensionContext) {
           // If the worklist contains functions already covered, use replace to avoid duplicates.
           const isAddingOnlyNewFunctions = workList.every(fn => !existingCovered.includes(fn)) && existingCovered.length > 0;
           const writeMode = isAddingOnlyNewFunctions ? 'append' : 'replace';
+          log(`Write mode: ${writeMode} (${workList.length}/${exportedFunctions.length} functions)`);
           await writeSpecFile(filePath, finalContent, log, updatedMarker, exportedFunctions, writeMode);
           telemetry.recordSuccess(providerName, nowCovered, nowPending);
           failureNotifiedFiles.delete(filePath); // clear so next failure re-notifies
+          const specCompileReady = !healResult.missingTypes && !healResult.hasGlobalErrors;
+          const specReason = healResult.missingTypes
+            ? `missing ${ctx.framework} typings`
+            : healResult.hasGlobalErrors
+              ? 'global TypeScript errors'
+              : 'ok';
+          log(`[SilentSpec] Spec written: yes`);
+          log(`[SilentSpec] Spec compile-ready: ${specCompileReady ? 'yes' : 'no'}`);
+          log(`[SilentSpec] Reason: ${specReason}`);
 
           const firstSuccess = context.globalState.get<boolean>('silentspec.firstSuccessShown', false);
           if (!firstSuccess) {
@@ -691,16 +712,6 @@ export function activate(context: vscode.ExtensionContext) {
                     }, 2000);
                   }
                 } else {
-                  // All functions covered after main batch — log final spec status.
-                  const specCompileReady = !healResult.missingTypes && !healResult.hasGlobalErrors;
-                  const specReason = healResult.missingTypes
-                    ? `missing ${ctx.framework} typings`
-                    : healResult.hasGlobalErrors
-                      ? 'global TypeScript errors'
-                      : 'ok';
-                  log(`[SilentSpec] Spec written: yes`);
-                  log(`[SilentSpec] Spec compile-ready: ${specCompileReady ? 'yes' : 'no'}`);
-                  log(`[SilentSpec] Reason: ${specReason}`);
                   generationStatus = '$(check) SS: Done';
                 }
               } else {
@@ -713,7 +724,7 @@ export function activate(context: vscode.ExtensionContext) {
           activeGenerations--;
           // Only update the status bar when all concurrent generations are done.
           // If other files are still generating, leave the "Generating..." indicator.
-          if (activeGenerations === 0 && generationStatus !== null) {
+          if (activeGenerations === 0) {
             updateStatusBar(generationStatus);
             setTimeout(() => updateStatusBar(), 3000);
           }

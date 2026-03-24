@@ -289,7 +289,7 @@ async function runPreflightCheck(ctx: SilentSpecContext, filePath: string): Prom
           dir = parent;
         }
         if (found) {
-          log(`Pre-flight: ${pkg} found in hoisted node_modules at ${path.relative(hoistRoot, path.join(path.dirname(projectRoot), 'node_modules', pkg))}`);
+          log(`Pre-flight: ${pkg} found in hoisted node_modules at ${path.join(path.dirname(projectRoot), 'node_modules', pkg)}`);
           missingPkgs.splice(i, 1);
         }
       }
@@ -391,8 +391,7 @@ function phaseContext(result: ASTAnalysisResult, filePath: string): SilentSpecCo
 // Phase 4 — spec path resolution.
 // Determines where the spec file lives or will be created.
 async function phaseSpecPath(ctx: SilentSpecContext, filePath: string): Promise<void> {
-  ctx.specPath = await resolveSpecPath(filePath);
-  log(`Spec path resolved: ${path.basename(ctx.specPath)}`);
+  ctx.specPath = await resolveSpecPath(filePath, log);
 }
 
 // Core save handler — runs after debounce delay.
@@ -437,7 +436,7 @@ async function handleFileSave(
       const timeSinceLast = Date.now() - lastTime;
 
       if (lastHash === hash && timeSinceLast < FORMATTER_WINDOW_MS) {
-        log(`Skipped: formatter re-save detected (same content within ${FORMATTER_WINDOW_MS / 1000}s) — ${path.basename(filePath)}`);
+        log(`Skipped: formatter re-save detected (same content within ${FORMATTER_WINDOW_MS / 1000}s, hash=${hash.slice(0, 8)}) — ${path.basename(filePath)}`);
         return;
       }
 
@@ -496,18 +495,22 @@ async function handleFileSave(
 
         if (startCount > 1) {
           log('Spec file: duplicate SS-GENERATED-START marker');
+          log(`Context: ${ctx.specPath}`);
           return;
         }
         if (hasStart && !hasEnd) {
           log('Spec file: missing SS-GENERATED-END marker');
+          log(`Context: ${ctx.specPath}`);
           return;
         }
         if (!hasStart && hasEnd) {
           log('Spec file: missing SS-GENERATED-END marker');
+          log(`Context: ${ctx.specPath}`);
           return;
         }
         if (hasStart && hasEnd && endIdx < startIdx) {
           log('Spec file: markers out of order');
+          log(`Context: ${ctx.specPath}`);
           return;
         }
       }
@@ -527,6 +530,7 @@ async function handleFileSave(
             existing.includes('// </SS-USER-TESTS>');
           if (!hasFullZones) {
             log('Spec file: incomplete zone structure — skipping write');
+            log(`Context: ${ctx.specPath}`);
             return;
           }
 
@@ -552,7 +556,16 @@ async function handleFileSave(
             posGenStart      < posGenEnd;
 
           if (!zoneOrderValid) {
+            const zoneOrderReason =
+              posImportsStart  >= posImportsEnd   ? 'SS-IMPORTS-START must precede SS-IMPORTS-END' :
+              posImportsEnd    >= posHelpersStart ? 'SS-IMPORTS-END must precede SS-HELPERS-START' :
+              posHelpersStart  >= posHelpersEnd   ? 'SS-HELPERS-START must precede SS-HELPERS-END' :
+              posHelpersEnd    >= posUserStart    ? 'SS-HELPERS-END must precede SS-USER-TESTS' :
+              posUserStart     >= posUserEnd      ? 'SS-USER-TESTS must precede /SS-USER-TESTS' :
+              posUserEnd       >= posGenStart     ? '/SS-USER-TESTS must precede SS-GENERATED-START' :
+              'SS-GENERATED-START must precede SS-GENERATED-END';
             log('Spec file: zone order invalid — skipping write');
+            log(`Context: ${ctx.specPath} — ${zoneOrderReason}`);
             return;
           }
         }
@@ -610,8 +623,10 @@ async function handleFileSave(
         if (specContent !== originalContent) {
           await fs.writeFile(ctx.specPath, specContent, 'utf8');
         }
-      } catch {
+      } catch (err: unknown) {
         // Spec may not exist if onPromptReady failed — not an error
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`Post-batch: could not update spec marker — ${msg}`);
       }
     }
 

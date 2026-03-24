@@ -356,8 +356,11 @@ export function healSpec(
         errorCount: 0, wasHealed: false, healedCount: 0,
         hasGlobalErrors: false, missingTypes: false, framework,
       };
-    } catch {
+    } catch (err: unknown) {
       // tsc exited non-zero or was not found — fall through to normal analysis
+      const msg = err instanceof Error ? err.message : String(err);
+      const firstLine = msg.split('\n')[0].trim();
+      emit(`Healer: tsc reported errors — running diagnostic analysis (${firstLine})`);
     }
   }
 

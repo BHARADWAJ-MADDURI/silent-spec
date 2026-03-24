@@ -447,7 +447,8 @@ function extractLegacyContent(existing: string): LegacyContent {
 
 // ─── Spec path resolution ─────────────────────────────────────────────────────
 
-async function detectNamingConvention(dir: string): Promise<'.spec.ts' | '.test.ts'> {
+async function detectNamingConvention(dir: string, log?: (msg: string) => void): Promise<'.spec.ts' | '.test.ts'> {
+  const emit = log ?? (() => {});
   const testPattern = /\.(test)\.[tj]sx?$/;
   const specPattern = /\.(spec)\.[tj]sx?$/;
 
@@ -456,16 +457,16 @@ async function detectNamingConvention(dir: string): Promise<'.spec.ts' | '.test.
     if (fs.existsSync(testDirPath) && fs.lstatSync(testDirPath).isDirectory()) {
       try {
         const files = fs.readdirSync(testDirPath);
-        if (files.some(f => testPattern.test(f))) { return '.test.ts'; }
-        if (files.some(f => specPattern.test(f))) { return '.spec.ts'; }
+        if (files.some(f => testPattern.test(f))) { emit(`Naming convention: .test.ts (found in ${testDirPath})`); return '.test.ts'; }
+        if (files.some(f => specPattern.test(f))) { emit(`Naming convention: .spec.ts (found in ${testDirPath})`); return '.spec.ts'; }
       } catch { /* skip */ }
     }
   }
 
   try {
     const files = fs.readdirSync(dir);
-    if (files.some(f => testPattern.test(f))) { return '.test.ts'; }
-    if (files.some(f => specPattern.test(f))) { return '.spec.ts'; }
+    if (files.some(f => testPattern.test(f))) { emit(`Naming convention: .test.ts (found in ${dir})`); return '.test.ts'; }
+    if (files.some(f => specPattern.test(f))) { emit(`Naming convention: .spec.ts (found in ${dir})`); return '.spec.ts'; }
   } catch { /* skip */ }
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -474,8 +475,8 @@ async function detectNamingConvention(dir: string): Promise<'.spec.ts' | '.test.
   while (current !== dir && workspaceRoot && current.startsWith(workspaceRoot)) {
     try {
       const files = fs.readdirSync(current);
-      if (files.some(f => testPattern.test(f))) { return '.test.ts'; }
-      if (files.some(f => specPattern.test(f))) { return '.spec.ts'; }
+      if (files.some(f => testPattern.test(f))) { emit(`Naming convention: .test.ts (found in ${current})`); return '.test.ts'; }
+      if (files.some(f => specPattern.test(f))) { emit(`Naming convention: .spec.ts (found in ${current})`); return '.spec.ts'; }
     } catch { /* skip */ }
     dir     = current;
     current = path.dirname(current);
@@ -483,17 +484,19 @@ async function detectNamingConvention(dir: string): Promise<'.spec.ts' | '.test.
 
   const testFiles = await vscode.workspace.findFiles('**/*.test.{ts,tsx,js,jsx}', '**/node_modules/**', 1);
   const specFiles = await vscode.workspace.findFiles('**/*.spec.{ts,tsx,js,jsx}', '**/node_modules/**', 1);
-  if (testFiles.length > 0) { return '.test.ts'; }
-  if (specFiles.length > 0) { return '.spec.ts'; }
+  if (testFiles.length > 0) { emit('Naming convention: .test.ts (workspace-wide search)'); return '.test.ts'; }
+  if (specFiles.length > 0) { emit('Naming convention: .spec.ts (workspace-wide search)'); return '.spec.ts'; }
+  emit('Naming convention: .spec.ts (default — no existing test files found)');
   return '.spec.ts';
 }
 
-export async function resolveSpecPath(sourcePath: string): Promise<string> {
+export async function resolveSpecPath(sourcePath: string, log?: (msg: string) => void): Promise<string> {
+  const emit = log ?? (() => {});
   const ext  = path.extname(sourcePath);
   const base = path.basename(sourcePath, ext);
   const dir  = path.dirname(sourcePath);
 
-  const convention = await detectNamingConvention(dir);
+  const convention = await detectNamingConvention(dir, log);
 
   const preferredExt = (() => {
     if (ext === '.tsx') { return convention === '.test.ts' ? '.test.tsx' : '.spec.tsx'; }
@@ -517,14 +520,14 @@ export async function resolveSpecPath(sourcePath: string): Promise<string> {
     if (!fs.existsSync(potentialDir) || !fs.lstatSync(potentialDir).isDirectory()) { continue; }
     for (const e of allExts) {
       const candidate = path.join(potentialDir, `${base}${e}`);
-      if (fs.existsSync(candidate)) { return candidate; }
+      if (fs.existsSync(candidate)) { emit(`Spec path resolved (pass 1 — existing in test subfolder): ${candidate}`); return candidate; }
     }
   }
 
   // Pass 2 — existing file in same directory as source
   for (const e of allExts) {
     const candidate = path.join(dir, `${base}${e}`);
-    if (fs.existsSync(candidate)) { return candidate; }
+    if (fs.existsSync(candidate)) { emit(`Spec path resolved (pass 2 — existing in source dir): ${candidate}`); return candidate; }
   }
 
   // Pass 3 — walk up to workspace root looking for a test folder
@@ -535,7 +538,9 @@ export async function resolveSpecPath(sourcePath: string): Promise<string> {
     for (const testDir of TEST_DIRS) {
       const potentialDir = path.join(searchDir, testDir);
       if (fs.existsSync(potentialDir) && fs.lstatSync(potentialDir).isDirectory()) {
-        return path.join(potentialDir, specName);
+        const resolved = path.join(potentialDir, specName);
+        emit(`Spec path resolved (pass 3 — test folder walk-up): ${resolved}`);
+        return resolved;
       }
     }
     if (searchDir === searchRoot) { break; }
@@ -551,12 +556,16 @@ export async function resolveSpecPath(sourcePath: string): Promise<string> {
     for (const testDir of TEST_DIRS) {
       const rootTestPath = path.join(workspaceRoot, testDir);
       if (fs.existsSync(rootTestPath) && fs.lstatSync(rootTestPath).isDirectory()) {
-        return path.join(rootTestPath, path.relative(workspaceRoot, dir), specName);
+        const resolved = path.join(rootTestPath, path.relative(workspaceRoot, dir), specName);
+        emit(`Spec path resolved (pass 4 — workspace root mirror): ${resolved}`);
+        return resolved;
       }
     }
   }
 
-  return path.join(dir, specName);
+  const fallback = path.join(dir, specName);
+  emit(`Spec path resolved (pass 5 — fallback, same dir as source): ${fallback}`);
+  return fallback;
 }
 
 // ─── Low-level writer ─────────────────────────────────────────────────────────
@@ -565,7 +574,8 @@ async function writeSpecFileToPath(
   specPath: string,
   finalContent: string,
   log: (msg: string) => void,
-  targetedRange?: { startIdx: number; endIdx: number; newBlock: string }
+  targetedRange?: { startIdx: number; endIdx: number; newBlock: string },
+  isNew: boolean = false
 ): Promise<void> {
   const specUri = vscode.Uri.file(specPath);
   try {
@@ -584,7 +594,11 @@ async function writeSpecFileToPath(
       edit.replace(specUri, fullRange, finalContent);
       await vscode.workspace.applyEdit(edit);
       await doc.save();
-      log(`Updated: ${path.basename(specPath)}`);
+      if (isNew) {
+        log(`Created: ${path.basename(specPath)}`);
+      } else {
+        log(`Updated: ${path.basename(specPath)}`);
+      }
     }
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -617,7 +631,7 @@ export async function writeSpecFile(
   exportedFunctions?: string[],
   mode: 'replace' | 'append' = 'replace'
 ): Promise<void> {
-  const specPath = await resolveSpecPath(sourcePath);
+  const specPath = await resolveSpecPath(sourcePath, log);
   const { importsBlock, helpersBlock, testsBlock: generatedBlock } = splitAIOutput(aiOutput, marker);
 
   const markerSummary =
@@ -634,7 +648,7 @@ export async function writeSpecFile(
     );
     edit.createFile(specUri, { overwrite: false, ignoreIfExists: false });
     await vscode.workspace.applyEdit(edit);
-    await writeSpecFileToPath(specPath, content, log);
+    await writeSpecFileToPath(specPath, content, log, undefined, true);
     log(`New spec created — ${markerSummary}`);
     return;
   }
@@ -717,7 +731,16 @@ export async function writeSpecFile(
     posGenStart      < posGenEnd;
 
   if (!zoneOrderValid) {
+    const zoneOrderReason =
+      posImportsStart  >= posImportsEnd   ? 'SS-IMPORTS-START must precede SS-IMPORTS-END' :
+      posImportsEnd    >= posHelpersStart ? 'SS-IMPORTS-END must precede SS-HELPERS-START' :
+      posHelpersStart  >= posHelpersEnd   ? 'SS-HELPERS-START must precede SS-HELPERS-END' :
+      posHelpersEnd    >= posUserStart    ? 'SS-HELPERS-END must precede SS-USER-TESTS' :
+      posUserStart     >= posUserEnd      ? 'SS-USER-TESTS must precede /SS-USER-TESTS' :
+      posUserEnd       >= posGenStart     ? '/SS-USER-TESTS must precede SS-GENERATED-START' :
+      'SS-GENERATED-START must precede SS-GENERATED-END';
     log('Spec file: zone order invalid — skipping write');
+    log(`Context: ${zoneOrderReason}`);
     return;
   }
 
@@ -798,8 +821,8 @@ export async function writeSpecFile(
     exportedFunctions
   );
 
-  log(`Migration complete — existing content preserved — ${markerSummary}`);
   await writeSpecFileToPath(specPath, finalContent, log);
+  log(`Migration complete — existing content preserved — ${markerSummary}`);
 }
 
 // ─── Gap batch append ─────────────────────────────────────────────────────────
@@ -810,7 +833,7 @@ export async function appendGapTests(
   updatedMarker: SSMarker,
   log: (msg: string) => void
 ): Promise<void> {
-  const specPath = await resolveSpecPath(sourcePath);
+  const specPath = await resolveSpecPath(sourcePath, log);
 
   if (!fs.existsSync(specPath)) {
     log('Gap append: spec not found — skipping');
@@ -919,7 +942,7 @@ export async function updateMarker(
   updatedMarker: SSMarker,
   log: (msg: string) => void
 ): Promise<void> {
-  const specPath = await resolveSpecPath(sourcePath);
+  const specPath = await resolveSpecPath(sourcePath, log);
   if (!fs.existsSync(specPath)) { return; }
 
   try {
