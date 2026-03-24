@@ -365,7 +365,7 @@ async function phaseAST(
   const result = analyzeFile(filePath, log);
   if (!result.isTestable) {
     log(`Skipped: ${result.skipReason} — ${filePath}`);
-    updateStatus(`$(circle-slash) Skipped — ${result.skipReason}`);
+    updateStatus(`$(circle-slash) Skipped: ${result.skipReason}`);
     setTimeout(() => updateStatus(''), 3000);
     return null;
   }
@@ -453,7 +453,7 @@ async function handleFileSave(
         ? `file too large (${lines.length} lines)`
         : `file too large (${content.length} chars)`;
       log(`Skipped: ${reason} — ${filePath}`);
-      updateStatus(`$(circle-slash) Skipped — file too large`);
+      updateStatus(`$(circle-slash) Skipped: file too large`);
       setTimeout(() => updateStatus(''), 3000);
       return;
     }

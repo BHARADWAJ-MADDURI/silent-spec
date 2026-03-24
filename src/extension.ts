@@ -274,7 +274,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   function updateStatusBar(text?: string) {
     if (text) { statusBar.text = text; statusBar.backgroundColor = undefined; return; }
-    statusBar.text = isPaused ? '$(debug-pause) SS: Paused' : `SilentSpec $(check) — ${lastUsedProvider}`;
+    statusBar.text = isPaused ? '$(debug-pause) Paused' : `SilentSpec $(check) — ${lastUsedProvider}`;
     statusBar.tooltip = isPaused ? 'SilentSpec paused — click to resume' : `SilentSpec active — using ${lastUsedProvider}. Click to pause.`;
     statusBar.backgroundColor = isPaused ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
   }
