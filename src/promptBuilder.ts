@@ -173,7 +173,9 @@ function buildRole(ctx: SilentSpecContext): string {
 23. VITEST: describe/it/test/expect/vi/beforeEach are NOT globals — MUST import: import { describe, it, expect, vi, beforeEach } from 'vitest'.
     JEST: describe/it/test/expect/jest/beforeEach ARE globals — NEVER import them. NEVER add \`import { jest } from '@jest/globals'\` unless @jest/globals is explicitly listed in the project's package.json — standard jest projects provide jest as a global automatically.
     MOCHA: describe/it/beforeEach are globals. Use chai: import { expect } from 'chai'. Use sinon for mocks. NEVER use jest.fn()/vi.fn().
-    JASMINE: describe/it/beforeEach/expect are globals. Use jasmine.createSpy(). NEVER use jest.fn()/vi.fn().`;
+    JASMINE: describe/it/beforeEach/expect are globals. Use jasmine.createSpy(). NEVER use jest.fn()/vi.fn().
+24. Never import from @jest/globals. Jest globals (describe, it, expect, beforeEach, afterEach, jest) are available globally without any import. Never write: import { describe } from '@jest/globals' or any variation. Remove any such import if it appears in your output.
+25. When mocking globalThis.fetch or global.fetch, use this exact pattern: For Jest: (globalThis as any).fetch = jest.fn(). For Vitest: (globalThis as any).fetch = vi.fn(). Never use jest.spyOn(global, 'fetch') — this causes TypeScript type errors. Never assign directly to global.fetch or globalThis.fetch without the (as any) cast.`;
 
   const extras: string[] = [];
   if (isFrontend) {

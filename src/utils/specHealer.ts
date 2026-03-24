@@ -281,27 +281,19 @@ function isTestFrameworkGlobalError(error: ErrorRange, specContent: string): boo
 // vitest/jest handle themselves at runtime.
 function isInsideMockFactory(pos: number, specContent: string): boolean {
   const before = specContent.slice(0, pos);
-  const mockMatch = before.match(/(?:vi|jest)\.mock\s*\([^)]*$/);
-  if (!mockMatch) { return false; }
-  const afterMock = specContent.slice(before.lastIndexOf(mockMatch[0]));
+  const viPos = before.lastIndexOf('vi.mock(');
+  const jestPos = before.lastIndexOf('jest.mock(');
+  const mockStart = Math.max(viPos, jestPos);
+  if (mockStart === -1) { return false; }
   let depth = 0;
-  for (let i = 0; i < afterMock.length && i < pos; i++) {
-    if (afterMock[i] === '(') { depth++; }
-    if (afterMock[i] === ')') {
+  for (let i = mockStart; i < before.length; i++) {
+    if (before[i] === '(') { depth++; }
+    if (before[i] === ')') {
       depth--;
       if (depth === 0) { return false; }
     }
   }
   return depth > 0;
-}
-
-// Returns true if an error should be treated as a healer false positive.
-// Combines mock factory errors AND test framework global errors.
-function isHealerFalsePositive(error: ErrorRange, specContent: string): boolean {
-  return (
-    isInsideMockFactory(error.start, specContent) ||
-    isTestFrameworkGlobalError(error, specContent)
-  );
 }
 
 function getLineNumber1Based(pos: number, content: string): number {
@@ -450,11 +442,6 @@ export function healSpec(
     let workErrorCount = diagnostics.length;
 
     emit(`Healer: ${outsideItErrors.length} outside-it error(s), checking for Category C candidates`);
-    for (const err of outsideItErrors) {
-      const lineNum    = getLineNumber1Based(err.start, specContent);
-      const inDescribe = describeBlocks.some(b => err.start >= b.start && err.end <= b.end);
-      emit(`Healer: error code=${err.code} line=${lineNum} inDescribe=${inDescribe} inMock=${isInsideMockFactory(err.start, specContent)}`);
-    }
 
     const categoryCCandidates = outsideItErrors
       .filter(err =>
@@ -503,10 +490,6 @@ export function healSpec(
       const lineNum   = getLineNumber1Based(err.start, workContent);
       const lineIndex = lineNum - 1;
       const lineText  = workLines[lineIndex] ?? '';
-
-      // Temporary debug: show exactly what line text the healer sees for each
-      // outside-it() error so we can confirm jest.mock/vi.mock detection.
-      emit(`Healer: line ${lineNum} text = "${lineText.trim().slice(0, 60)}"`);
 
       if (isInsideMockFactory(err.start, workContent)) {
         // Category A — inside vi.mock()/jest.mock() factory (runtime-handled)
