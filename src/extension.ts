@@ -202,7 +202,8 @@ async function runOneGapBatch(
   filePath: string, exportedFunctions: string[], exportTypes: Record<string, 'default' | 'named'>,
   previousPending: string[], provider: AIProvider, providerName: string,
   context: vscode.ExtensionContext, telemetry: TelemetryService,
-  log: (msg: string) => void, updateStatusBar: (text?: string) => void
+  log: (msg: string) => void, updateStatusBar: (text?: string) => void,
+  healerMode?: 'full' | 'safe'
 ): Promise<string[]> {
   const specPath = await resolveSpecPath(filePath);
   let existingMarker = null;
@@ -215,6 +216,7 @@ async function runOneGapBatch(
   if (!astResult.isTestable) { log('Gap batch: source is no longer testable — stopping'); return []; }
   const ctx = extractContext(filePath, workList, astResult.imports, log, exportTypes);
   ctx.specPath = specPath;
+  ctx.healerMode = healerMode;
   const prompt = buildPrompt(ctx);
   const AI_TIMEOUT_MS = vscode.workspace.getConfiguration('silentspec').get<number>('aiTimeoutSeconds', 60) * 1000;
   const controller = new AbortController();
@@ -446,13 +448,13 @@ export function activate(context: vscode.ExtensionContext) {
           const provider = await getActiveProvider();
           const canProceed = await checkCostAcknowledgement(context, providerName);
           if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
-          let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar);
+          let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full');
           while (pendingToResume.length > 0) {
             const retryable = filterRetryable(pendingToResume, pendingToResume, log);
             if (retryable.length === 0) { log('Gap Finder: all pending functions hit retry cap — stopping'); break; }
             log(`Gap Finder: ${retryable.length} function(s) pending — continuing loop...`);
             updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
-            pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar);
+            pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar, 'full');
           }
           log('Gap Finder: done');
           updateStatusBar('$(check) Done');
@@ -677,7 +679,7 @@ export function activate(context: vscode.ExtensionContext) {
             log(`Pending functions — continuing loop: [${retryable.join(', ')}]`);
             updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
             previousPending = pendingToResume;
-            pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar);
+            pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
           }
 
           // ── Compute final status (displayed in finally when activeGenerations === 0) ──
@@ -712,7 +714,7 @@ export function activate(context: vscode.ExtensionContext) {
                       processingQueue.enqueue(async () => {
                         log(`Auto-gap-fill: generating batch for [${notYetAttempted.join(', ')}]`);
                         updateStatusBar(`$(sync~spin) Generating... (${notYetAttempted.length} pending)...`);
-                        await runOneGapBatch(filePath, exportedFunctions, exportTypes, notYetAttempted, provider, providerName, context, telemetry, log, updateStatusBar);
+                        await runOneGapBatch(filePath, exportedFunctions, exportTypes, notYetAttempted, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
                       });
                     }, 2000);
                   }
