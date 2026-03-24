@@ -365,7 +365,7 @@ async function phaseAST(
   const result = analyzeFile(filePath, log);
   if (!result.isTestable) {
     log(`Skipped: ${result.skipReason} — ${filePath}`);
-    updateStatus(`$(info) SS: Skipped — ${result.skipReason}`);
+    updateStatus(`$(circle-slash) Skipped — ${result.skipReason}`);
     setTimeout(() => updateStatus(''), 3000);
     return null;
   }
@@ -453,7 +453,7 @@ async function handleFileSave(
         ? `file too large (${lines.length} lines)`
         : `file too large (${content.length} chars)`;
       log(`Skipped: ${reason} — ${filePath}`);
-      updateStatus(`$(info) SS: Skipped — file too large`);
+      updateStatus(`$(circle-slash) Skipped — file too large`);
       setTimeout(() => updateStatus(''), 3000);
       return;
     }
@@ -657,8 +657,8 @@ export function registerSaveHandler(
 
   const saveListener = vscode.workspace.onDidSaveTextDocument(
     (document: vscode.TextDocument) => {
-      if (document.isUntitled) { return; }
-      if (document.uri.scheme !== 'file') { return; }
+      if (document.isUntitled) { log('Skipped: untitled document'); return; }
+      if (document.uri.scheme !== 'file') { log(`Skipped: non-file scheme (${document.uri.scheme})`); return; }
       if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
         log('Skipped: no workspace folder open');
         return;
