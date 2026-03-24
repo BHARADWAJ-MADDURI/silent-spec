@@ -51,7 +51,7 @@ function getWorkspaceRoot(): string | null {
 //
 // Continues past package.json files with no known framework — does NOT
 // stop at the first package.json found, only at one that declares a framework.
-export function detectFramework(filePath: string, workspaceRoot: string): TestFramework {
+export function detectFramework(filePath: string, workspaceRoot: string): { framework: TestFramework; detected: boolean } {
   let dir = path.dirname(filePath);
   const fsRoot = path.parse(dir).root;
 
@@ -63,10 +63,10 @@ export function detectFramework(filePath: string, workspaceRoot: string): TestFr
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
         const deps = { ...pkg.dependencies, ...pkg.devDependencies };
 
-        if (deps['vitest'])                                          { return 'vitest'; }
-        if (deps['mocha'])                                           { return 'mocha'; }
-        if (deps['jasmine'])                                         { return 'jasmine'; }
-        if (deps['jest'] || deps['ts-jest'] || deps['babel-jest'])   { return 'jest'; }
+        if (deps['vitest'])                                          { return { framework: 'vitest', detected: true }; }
+        if (deps['mocha'])                                           { return { framework: 'mocha', detected: true }; }
+        if (deps['jasmine'])                                         { return { framework: 'jasmine', detected: true }; }
+        if (deps['jest'] || deps['ts-jest'] || deps['babel-jest'])   { return { framework: 'jest', detected: true }; }
 
         // This package.json has no known test framework —
         // keep walking up in case a parent package.json does.
@@ -84,7 +84,7 @@ export function detectFramework(filePath: string, workspaceRoot: string): TestFr
   }
 
   // No framework found in any package.json — default to jest
-  return 'jest';
+  return { framework: 'jest', detected: false };
 }
 
 export function findNearestTestFile(filePath: string): string | null {
@@ -248,10 +248,9 @@ export function extractContext(
 
   // Walk up from source file to find nearest package.json with a test framework.
   // Passes workspaceRoot as upper bound to avoid scanning outside the project.
-  const framework = detectFramework(filePath, workspaceRoot);
-  if (framework === 'jest') {
-    // Log whether this was a definitive jest detection or a fallback
-    log(`Framework detected: jest`);
+  const { framework, detected: frameworkDetected } = detectFramework(filePath, workspaceRoot);
+  if (!frameworkDetected) {
+    log('Framework not detected — defaulting to Jest');
   } else {
     log(`Framework detected: ${framework}`);
   }

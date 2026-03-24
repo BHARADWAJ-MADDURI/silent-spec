@@ -29,6 +29,7 @@ import {
 
 const activeControllers = new Set<AbortController>();
 let costCheckInProgress = false;
+let cachedOllamaRunning: boolean | null = null;
 // Project roots where the "Copy Fix Command" notification has been shown this session.
 // Prevents repeated notifications on every save when @types is missing.
 const typesWarningShownRoots = new Set<string>();
@@ -263,6 +264,7 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   const telemetry = new TelemetryService(context, installDate);
+  void isOllamaRunning().then(running => { cachedOllamaRunning = running; });
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = 'silentspec.togglePause';
   let isPaused = context.workspaceState.get<boolean>('silentspec.paused', false);
@@ -270,7 +272,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   function updateStatusBar(text?: string) {
     if (text) { statusBar.text = text; statusBar.backgroundColor = undefined; return; }
-    statusBar.text = isPaused ? '$(debug-pause) SS: Paused' : `$(zap) SS: On (${lastUsedProvider})`;
+    statusBar.text = isPaused ? '$(debug-pause) SS: Paused' : `SilentSpec $(check) — ${lastUsedProvider}`;
     statusBar.tooltip = isPaused ? 'SilentSpec paused — click to resume' : `SilentSpec active — using ${lastUsedProvider}. Click to pause.`;
     statusBar.backgroundColor = isPaused ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
   }
@@ -313,17 +315,17 @@ export function activate(context: vscode.ExtensionContext) {
     statusBar.backgroundColor = undefined;
   }
 
-  async function getActiveProvider(): Promise<AIProvider> {
+  function getActiveProvider(): AIProvider {
     const config = vscode.workspace.getConfiguration('silentspec');
     const configuredProvider = config.get<string>('provider', 'github');
-    if (configuredProvider === 'github') { const ollamaUp = await isOllamaRunning(); if (ollamaUp) { return getProvider(context, 'ollama'); } }
+    if (configuredProvider === 'github' && cachedOllamaRunning === true) { return getProvider(context, 'ollama'); }
     return getProvider(context);
   }
 
-  async function getActiveProviderName(): Promise<string> {
+  function getActiveProviderName(): string {
     const config = vscode.workspace.getConfiguration('silentspec');
     const configuredProvider = config.get<string>('provider', 'github');
-    if (configuredProvider === 'github') { const ollamaUp = await isOllamaRunning(); if (ollamaUp) { return 'ollama'; } }
+    if (configuredProvider === 'github' && cachedOllamaRunning === true) { return 'ollama'; }
     return configuredProvider;
   }
 
@@ -443,17 +445,17 @@ export function activate(context: vscode.ExtensionContext) {
           updateStatusBar();
           const provider = await getActiveProvider();
           const canProceed = await checkCostAcknowledgement(context, providerName);
-          if (!canProceed) { updateStatusBar('$(info) SS: Cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
+          if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
           let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar);
           while (pendingToResume.length > 0) {
             const retryable = filterRetryable(pendingToResume, pendingToResume, log);
             if (retryable.length === 0) { log('Gap Finder: all pending functions hit retry cap — stopping'); break; }
             log(`Gap Finder: ${retryable.length} function(s) pending — continuing loop...`);
-            updateStatusBar(`$(sync~spin) SS: Resuming (${retryable.length} pending)...`);
+            updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
             pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar);
           }
           log('Gap Finder: done');
-          updateStatusBar('$(check) SS: Done');
+          updateStatusBar('$(check) Done');
           setTimeout(() => updateStatusBar(), 3000);
         });
       }
@@ -510,7 +512,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         const provider = await getActiveProvider();
         const canProceed = await checkCostAcknowledgement(context, providerName);
-        if (!canProceed) { updateStatusBar('$(info) SS: Cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
+        if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
 
         // Fix 3 — pre-flight types warning notification (Improvement 1/3).
         // Does not block generation — we proceed in safe mode.
@@ -564,9 +566,9 @@ export function activate(context: vscode.ExtensionContext) {
         activeGenerations++;
         log(`Calling ${providerName} for ${path.basename(filePath)}...`);
         if (activeGenerations > 1) {
-          updateStatusBar(`$(sync~spin) SS: Generating (${activeGenerations} files)...`);
+          updateStatusBar(`$(sync~spin) Generating (${activeGenerations} files)...`);
         } else {
-          updateStatusBar('$(sync~spin) SS: Generating...');
+          updateStatusBar('$(sync~spin) Generating...');
         }
 
         const controller = new AbortController();
@@ -575,7 +577,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Default to error so an unhandled throw never leaves the status bar stuck.
         // Every normal path overwrites this before the finally block runs.
-        let generationStatus = '$(error) SS: Error';
+        let generationStatus = '$(error) Failed: unexpected error';
 
         try {
           const AI_TIMEOUT_MS = vscode.workspace.getConfiguration('silentspec').get<number>('aiTimeoutSeconds', 60) * 1000;
@@ -586,21 +588,23 @@ export function activate(context: vscode.ExtensionContext) {
           } catch (providerErr) {
             // Providers catch internally and return null — this handles any unexpected throws.
             telemetry.recordFailure(providerName, 'provider_error');
-            generationStatus = '$(warning) SS: Failed';
+            generationStatus = '$(error) Failed: provider exception';
             showProviderFailureToast(filePath, providerName, classifyProviderError(providerErr, false));
             log(`[SilentSpec] Spec written: no`);
+            log(`[SilentSpec] Spec compile-ready: no`);
             log(`[SilentSpec] Reason: provider exception`);
             return;
           }
           if (!raw) {
             telemetry.recordFailure(providerName, 'provider_error');
-            generationStatus = '$(warning) SS: Failed';
+            generationStatus = '$(error) Failed: provider error';
             // withTimeout returns null when its timer fires. If elapsed ≈ AI_TIMEOUT_MS the
             // timer fired first; otherwise the provider returned null for a different reason.
             const elapsed = Date.now() - callStartMs;
             const timedOut = elapsed >= AI_TIMEOUT_MS - 500;
             showProviderFailureToast(filePath, providerName, classifyProviderError(null, timedOut));
             log(`[SilentSpec] Spec written: no`);
+            log(`[SilentSpec] Spec compile-ready: no`);
             log(`[SilentSpec] Reason: provider error`);
             return;
           }
@@ -609,8 +613,9 @@ export function activate(context: vscode.ExtensionContext) {
           const validated = validateResponse(raw, log);
           if (!validated) {
             telemetry.recordFailure(providerName, 'invalid_response');
-            generationStatus = '$(warning) SS: Failed';
+            generationStatus = '$(error) Failed: invalid response';
             log(`[SilentSpec] Spec written: no`);
+            log(`[SilentSpec] Spec compile-ready: no`);
             log(`[SilentSpec] Reason: invalid response`);
             return;
           }
@@ -670,7 +675,7 @@ export function activate(context: vscode.ExtensionContext) {
             const retryable = filterRetryable(pendingToResume, previousPending, log);
             if (retryable.length === 0) { log('All pending functions hit retry cap — stopping auto-resume'); break; }
             log(`Pending functions — continuing loop: [${retryable.join(', ')}]`);
-            updateStatusBar(`$(sync~spin) SS: Resuming (${retryable.length} pending)...`);
+            updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
             previousPending = pendingToResume;
             pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar);
           }
@@ -685,8 +690,8 @@ export function activate(context: vscode.ExtensionContext) {
           if (!hasTests) {
             log('Warning: spec file has no remaining tests after healing');
             generationStatus = ctx.healerMode === 'safe'
-              ? '$(warning) SS: Generated (env not ready)'
-              : '$(error) SS: Healer removed all tests';
+              ? '$(error) Failed: env not ready'
+              : '$(error) Failed: healer removed all tests';
           } else {
             // CHECK B: any exported functions still not covered?
             try {
@@ -696,7 +701,7 @@ export function activate(context: vscode.ExtensionContext) {
                 const missing = exportedFunctions.filter(f => !finalMarker.covered.includes(f));
                 if (missing.length > 0) {
                   log(`Coverage incomplete: [${missing.join(', ')}] not yet covered`);
-                  generationStatus = `$(sync) SS: Partial (${missing.length} pending)`;
+                  generationStatus = `$(sync~spin) Generating... (${missing.length} pending)`;
                   // Only schedule functions the while loop never attempted.
                   // nowPending contains all functions the loop already retried —
                   // re-scheduling them would duplicate work the loop just exhausted.
@@ -706,18 +711,18 @@ export function activate(context: vscode.ExtensionContext) {
                     setTimeout(() => {
                       processingQueue.enqueue(async () => {
                         log(`Auto-gap-fill: generating batch for [${notYetAttempted.join(', ')}]`);
-                        updateStatusBar(`$(sync~spin) SS: Resuming (${notYetAttempted.length} pending)...`);
+                        updateStatusBar(`$(sync~spin) Generating... (${notYetAttempted.length} pending)...`);
                         await runOneGapBatch(filePath, exportedFunctions, exportTypes, notYetAttempted, provider, providerName, context, telemetry, log, updateStatusBar);
                       });
                     }, 2000);
                   }
                 } else {
-                  generationStatus = '$(check) SS: Done';
+                  generationStatus = `$(check) Done — ${finalMarker.covered.length} covered`;
                 }
               } else {
-                generationStatus = '$(check) SS: Done';
+                generationStatus = '$(check) Done';
               }
-            } catch { generationStatus = '$(check) SS: Done'; }
+            } catch { generationStatus = '$(check) Done'; }
           }
         } finally {
           activeControllers.delete(controller);

@@ -25,7 +25,7 @@ const PREFERRED_MODELS = [
 // 2 minutes gives headroom for large files on modest hardware.
 const TIMEOUT_MS = 120_000;
 
-async function detectBestModel(): Promise<string> {
+async function detectBestModel(): Promise<string | null> {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
       signal: AbortSignal.timeout(2000),
@@ -35,7 +35,7 @@ async function detectBestModel(): Promise<string> {
     const data = await response.json() as { models?: { name: string }[] };
     const available = data.models?.map(m => m.name) ?? [];
 
-    if (available.length === 0) { return FALLBACK_MODEL; }
+    if (available.length === 0) { return null; }
 
     // Pick first preferred model that's available
     for (const preferred of PREFERRED_MODELS) {
@@ -63,7 +63,7 @@ export class OllamaProvider implements AIProvider {
     return 'Output only valid TypeScript test code. No explanations outside code comments.';
   }
 
-  private async getModel(): Promise<string> {
+  private async getModel(): Promise<string | null> {
     // User override takes highest priority
     if (this.modelOverride) { return this.modelOverride; }
 
@@ -88,6 +88,11 @@ export class OllamaProvider implements AIProvider {
     });
 
     const model = await this.getModel();
+    if (!model) {
+      clearTimeout(timeout);
+      log("Ollama: no models installed — run 'ollama pull llama3.2' to get started");
+      return null;
+    }
     log(`Ollama: generating with model ${model}...`);
 
     try {
