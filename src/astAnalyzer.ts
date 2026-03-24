@@ -199,40 +199,12 @@ export function analyzeFile(
       exportTypes: {},
       imports: [],
       internalTypes: [],
-      skipReason: 'syntax error'
+      skipReason: 'AST parse failed'
     };
   }
 
   const { functions: exportedFunctions, exportTypes } =
     extractExportedFunctions(ast, filePath);
-
-  // Phase 7 — fallback for unexported functions
-  const fallbackFunctions: string[] = [];
-  if (exportedFunctions.length === 0) {
-    for (const node of ast.body) {
-      if (node.type === 'FunctionDeclaration' && node.id?.name) {
-        fallbackFunctions.push(node.id.name);
-        exportTypes[node.id.name] = 'named'; // fallback = treat as named
-      }
-      if (node.type === 'VariableDeclaration') {
-        for (const declarator of node.declarations) {
-          if (
-            declarator.id.type === 'Identifier' &&
-            (declarator.init?.type === 'ArrowFunctionExpression' ||
-             declarator.init?.type === 'FunctionExpression')
-          ) {
-            fallbackFunctions.push(declarator.id.name);
-            exportTypes[declarator.id.name] = 'named';
-          }
-        }
-      }
-    }
-
-    if (fallbackFunctions.length > 0) {
-      log?.(`No exports found — falling back to ${fallbackFunctions.length} top-level function(s)`);
-      exportedFunctions.push(...fallbackFunctions);
-    }
-  }
 
   if (exportedFunctions.length === 0) {
     return {
@@ -241,7 +213,7 @@ export function analyzeFile(
       exportTypes: {},
       imports: [],
       internalTypes: [],
-      skipReason: 'no testable functions found',
+      skipReason: 'no exported testable symbols',
     };
   }
 

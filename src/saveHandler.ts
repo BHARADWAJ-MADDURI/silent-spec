@@ -659,6 +659,10 @@ export function registerSaveHandler(
     (document: vscode.TextDocument) => {
       if (document.isUntitled) { return; }
       if (document.uri.scheme !== 'file') { return; }
+      if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+        log('Skipped: no workspace folder open');
+        return;
+      }
 
       const filePath = document.uri.fsPath;
 

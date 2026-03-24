@@ -47,7 +47,14 @@ const TEST_DIRS = ['__tests__', 'tests', 'test', 'specs'];
 
 function buildHeader(sourcePath?: string, exportedFunctions?: string[]): string {
   const date = new Date().toISOString().split('T')[0];
-  const sourceNote = sourcePath ? `\n// Source: ${path.basename(sourcePath)}` : '';
+  const workspaceFolder = sourcePath
+    ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(sourcePath))
+    : undefined;
+  const workspaceRoot = workspaceFolder?.uri.fsPath;
+  const sourceDisplay = (workspaceRoot && sourcePath)
+    ? path.relative(workspaceRoot, sourcePath)
+    : sourcePath ? path.basename(sourcePath) : '';
+  const sourceNote = sourceDisplay ? `\n// Source: ${sourceDisplay}` : '';
   const fnNote = exportedFunctions && exportedFunctions.length > 0
     ? `\n// Functions covered: ${exportedFunctions.join(', ')}`
     : '';
@@ -530,39 +537,80 @@ export async function resolveSpecPath(sourcePath: string, log?: (msg: string) =>
     if (fs.existsSync(candidate)) { emit(`Spec path resolved (pass 2 — existing in source dir): ${candidate}`); return candidate; }
   }
 
-  // Pass 3 — walk up to workspace root looking for a test folder
-  const workspaceFolderForSearch = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(sourcePath));
-  const searchRoot = workspaceFolderForSearch?.uri.fsPath ?? path.parse(dir).root;
-  let searchDir = dir;
-  while (true) {
-    for (const testDir of TEST_DIRS) {
-      const potentialDir = path.join(searchDir, testDir);
-      if (fs.existsSync(potentialDir) && fs.lstatSync(potentialDir).isDirectory()) {
-        const resolved = path.join(potentialDir, specName);
-        emit(`Spec path resolved (pass 3 — test folder walk-up): ${resolved}`);
-        return resolved;
-      }
-    }
-    if (searchDir === searchRoot) { break; }
-    const parent = path.dirname(searchDir);
-    if (parent === searchDir) { break; }
-    searchDir = parent;
-  }
-
-  // Pass 4 — mirror workspace root test folder structure
+  // Pass 3 — existing spec in root-level test dirs (lookup only — never creates new files here).
+  // Checks both mirrored paths (e.g. __tests__/src/utils/foo.spec.ts) and flat paths
+  // (e.g. __tests__/foo.spec.ts). Flat paths require basename collision check because
+  // multiple source files can share the same basename.
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(sourcePath));
   const workspaceRoot   = workspaceFolder?.uri.fsPath;
+  let collisionDetected = false;
   if (workspaceRoot && workspaceRoot !== dir) {
     for (const testDir of TEST_DIRS) {
-      const rootTestPath = path.join(workspaceRoot, testDir);
-      if (fs.existsSync(rootTestPath) && fs.lstatSync(rootTestPath).isDirectory()) {
-        const resolved = path.join(rootTestPath, path.relative(workspaceRoot, dir), specName);
-        emit(`Spec path resolved (pass 4 — workspace root mirror): ${resolved}`);
-        return resolved;
+      const rootTestDir = path.join(workspaceRoot, testDir);
+      if (!fs.existsSync(rootTestDir) || !fs.lstatSync(rootTestDir).isDirectory()) { continue; }
+
+      // Mirrored path — directory structure disambiguates, no collision possible
+      const relativePath = path.relative(workspaceRoot, dir);
+      for (const e of allExts) {
+        const mirroredCandidate = path.join(rootTestDir, relativePath, `${base}${e}`);
+        if (fs.existsSync(mirroredCandidate)) {
+          emit(`Spec path resolved (pass 3 — existing in root test dir, mirrored): ${mirroredCandidate}`);
+          return mirroredCandidate;
+        }
       }
+
+      // Flat path — basename collision possible, verify the spec belongs to this source.
+      // New specs store a relative path (e.g. "src/api/utils.ts") in the Source header.
+      // Legacy specs store only the basename (e.g. "utils.ts"). Accept a basename-only
+      // match only when the source file is directly in the workspace root, since that is
+      // the one case where relative path === basename — no ambiguity.
+      const relSource = workspaceRoot
+        ? path.relative(workspaceRoot, sourcePath)
+        : path.basename(sourcePath);
+      const basenameOnly = path.basename(sourcePath);
+      const sourceIsAtWorkspaceRoot =
+        !!workspaceRoot && path.dirname(sourcePath) === workspaceRoot;
+      for (const e of allExts) {
+        const flatCandidate = path.join(rootTestDir, `${base}${e}`);
+        if (!fs.existsSync(flatCandidate)) { continue; }
+        try {
+          const content = fs.readFileSync(flatCandidate, 'utf8');
+          const ownsSpec =
+            content.includes(`// Source: ${relSource}`) ||
+            (sourceIsAtWorkspaceRoot && content.includes(`// Source: ${basenameOnly}`));
+          if (ownsSpec) {
+            emit(`Spec path resolved (pass 3 — existing in root test dir): ${flatCandidate}`);
+            return flatCandidate;
+          }
+        } catch { /* can't read → can't prove ownership */ }
+        // Cannot prove this spec belongs to the current source file — collision
+        emit('Spec placement: basename collision detected — placing beside source');
+        collisionDetected = true;
+        break;
+      }
+      if (collisionDetected) { break; }
     }
   }
 
+  // Pass 4 — new file in adjacent test dir, only if that directory already has spec files
+  // (established pattern). Skipped when a basename collision was detected — fall straight
+  // through to beside-source placement for safety.
+  if (!collisionDetected) {
+    for (const testDir of TEST_DIRS) {
+      const adjacentTestDir = path.join(dir, testDir);
+      if (!fs.existsSync(adjacentTestDir) || !fs.lstatSync(adjacentTestDir).isDirectory()) { continue; }
+      try {
+        const files = fs.readdirSync(adjacentTestDir);
+        if (files.some(f => /\.(test|spec)\.[tj]sx?$/.test(f))) {
+          const resolved = path.join(adjacentTestDir, specName);
+          emit(`Spec path resolved (pass 4 — new file in established test dir): ${resolved}`);
+          return resolved;
+        }
+      } catch { /* skip unreadable directory */ }
+    }
+  }
+
+  // Pass 5 — fallback: new file beside source
   const fallback = path.join(dir, specName);
   emit(`Spec path resolved (pass 5 — fallback, same dir as source): ${fallback}`);
   return fallback;
@@ -669,6 +717,19 @@ export async function writeSpecFile(
     return;
   }
 
+  // Guard: unmanaged spec file — has neither SilentSpec header nor any SS marker.
+  // If neither indicator is present, this is a hand-written test file — do not touch it.
+  const hasSilentSpecHeader = existing.includes('// @auto-generated by SilentSpec');
+  const hasAnySSMarker =
+    existing.includes(SS_IMPORTS_START) || existing.includes(SS_IMPORTS_END) ||
+    existing.includes(SS_HELPERS_START) || existing.includes(SS_HELPERS_END) ||
+    existing.includes(SS_USER_START)    || existing.includes(SS_USER_END) ||
+    existing.includes(SS_START_PREFIX)  || existing.includes(SS_END);
+  if (!hasSilentSpecHeader && !hasAnySSMarker) {
+    log('Spec file: not managed by SilentSpec — skipping');
+    return;
+  }
+
   // Guard: detect broken SS marker structure before any write or migration
   const hasStart = existing.includes('// <SS-GENERATED-START');
   const hasEnd = existing.includes('// <SS-GENERATED-END>');
@@ -752,9 +813,12 @@ export async function writeSpecFile(
       return;
     }
 
-    // Replace system zones — SS-USER-TESTS is never touched
-    // null return means duplicate markers detected — abort entire write
-    const withSystemZones = replaceSystemZones(existing, importsBlock, helpersBlock, log);
+    // Replace system zones — SS-USER-TESTS is never touched.
+    // In append mode, only SS-GENERATED is updated — SS-IMPORTS and SS-HELPERS are preserved.
+    // null return means duplicate markers detected — abort entire write.
+    const withSystemZones = mode === 'append'
+      ? existing
+      : replaceSystemZones(existing, importsBlock, helpersBlock, log);
     if (withSystemZones === null) { return; }
 
     const { startIdx, endIdx } = readMarker(withSystemZones);
