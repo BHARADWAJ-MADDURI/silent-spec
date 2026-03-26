@@ -192,7 +192,11 @@ function fixImportStatement(validated: string, filePath: string, specPath: strin
   else if (defaultExport) { correctImport = `import ${defaultExport} from '${relativePath}';`; }
   else { correctImport = `import ${namedPart} from '${relativePath}';`; }
   const filenameNoExt = sourceBaseName.replace(/\.[tj]sx?$/, '');
-  const nuclearRegex = new RegExp(`import\\s+[\\s\\S]*?\\s+from\\s+['"].*${filenameNoExt}['"];?`, 'gm');
+  const escapedFilename = filenameNoExt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nuclearRegex = new RegExp(
+    `import\\s+[\\s\\S]*?\\s+from\\s+['"](?:\\.\\./|\\./)(?:[^'"]*/)*${escapedFilename}['"];?`,
+    'gm'
+  );
   if (nuclearRegex.test(validated)) { log(`Import corrected for ${filenameNoExt}`); return validated.replace(nuclearRegex, correctImport); }
   log(`Warning: no import found for ${filenameNoExt} — injecting after SS-GENERATED-START`);
   return validated.replace(/\/\/ <SS-GENERATED-START[^\n]*/, (match) => `${match}\n${correctImport}`);
@@ -224,10 +228,22 @@ async function runOneGapBatch(
   try {
     log(`Gap batch: calling ${providerName} for [${workList.join(', ')}]...`);
     const raw = await withTimeout(provider.generateTests(prompt, log, controller.signal), AI_TIMEOUT_MS, 'Gap batch', log);
-    if (!raw) { telemetry.recordFailure(providerName, 'provider_error'); return []; }
+    if (!raw) {
+      telemetry.recordFailure(providerName, 'provider_error');
+      log('[SilentSpec] Spec written: no');
+      log('[SilentSpec] Spec compile-ready: no');
+      log('[SilentSpec] Reason: provider returned null response');
+      return [];
+    }
     // validateResponse handles truncation — returns null if output is truncated or unbalanced
     const validated = validateResponse(raw, log);
-    if (!validated) { telemetry.recordFailure(providerName, 'invalid_response'); return previousPending; }
+    if (!validated) {
+      telemetry.recordFailure(providerName, 'invalid_response');
+      log('[SilentSpec] Spec written: no');
+      log('[SilentSpec] Spec compile-ready: no');
+      log('[SilentSpec] Reason: AI response failed validation');
+      return previousPending;
+    }
     const fixedValidated = fixImportStatement(validated, filePath, specPath, exportedFunctions, exportTypes, log);
     if (fixedValidated !== validated) { log('Gap batch: import corrected'); }
     const { nowCovered, nowPending } = verifyGenerated(fixedValidated, workList);
@@ -717,6 +733,11 @@ export function activate(context: vscode.ExtensionContext) {
                         log(`Auto-gap-fill: generating batch for [${notYetAttempted.join(', ')}]`);
                         updateStatusBar(`$(sync~spin) Generating... (${notYetAttempted.length} pending)...`);
                         await runOneGapBatch(filePath, exportedFunctions, exportTypes, notYetAttempted, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
+                        log('[SilentSpec] Auto-gap-fill complete');
+                        if (activeGenerations === 0) {
+                          updateStatusBar('$(check) Done');
+                          setTimeout(() => updateStatusBar(), 3000);
+                        }
                       });
                     }, 2000);
                   }
