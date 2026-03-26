@@ -1,5 +1,6 @@
 {
   "name": "silent-spec",
+  "publisher": "bharadwajmadduri",
   "displayName": "SilentSpec",
   "description": "Auto-generates unit tests on file save using AI — silent, surgical, zero friction",
   "version": "0.0.1",
