@@ -593,7 +593,7 @@ async function handleFileSave(
 
     // Post-batch: banner management + coverage gap check — single read-modify-write.
     // Banner is injected (safe mode) or removed (full mode) then the spec is written once.
-    if (ctx.specPath) {
+    if (ctx.specPath && fsSync.existsSync(ctx.specPath)) {
       try {
         let specContent = await fs.readFile(ctx.specPath, 'utf8');
         const originalContent = specContent;
