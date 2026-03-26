@@ -580,6 +580,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Default to error so an unhandled throw never leaves the status bar stuck.
         // Every normal path overwrites this before the finally block runs.
         let generationStatus = '$(error) Failed: unexpected error';
+        let gapFillScheduled = false;
 
         try {
           const AI_TIMEOUT_MS = vscode.workspace.getConfiguration('silentspec').get<number>('aiTimeoutSeconds', 60) * 1000;
@@ -709,6 +710,7 @@ export function activate(context: vscode.ExtensionContext) {
                   // re-scheduling them would duplicate work the loop just exhausted.
                   const notYetAttempted = missing.filter(f => !nowPending.includes(f));
                   if (notYetAttempted.length > 0) {
+                    gapFillScheduled = true;
                     log(`Auto-scheduling next batch for [${notYetAttempted.join(', ')}]...`);
                     setTimeout(() => {
                       processingQueue.enqueue(async () => {
@@ -733,7 +735,11 @@ export function activate(context: vscode.ExtensionContext) {
           // If other files are still generating, leave the "Generating..." indicator.
           if (activeGenerations === 0) {
             updateStatusBar(generationStatus);
-            setTimeout(() => updateStatusBar(), 3000);
+            // Skip the idle-reset timeout when a gap fill batch is scheduled —
+            // it will set its own generating status when it starts.
+            if (!gapFillScheduled) {
+              setTimeout(() => updateStatusBar(), 3000);
+            }
           }
         }
       } finally { processingLock.delete(filePath); }
