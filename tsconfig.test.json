@@ -1,7 +1,18 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["mocha", "node"]
+    "strict": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "types": ["node", "jest"],
+    "isolatedModules": true,
+    "module": "CommonJS",
+    "moduleResolution": "node"
   },
-  "include": ["src/test/**/*"]
+  "include": [
+    "src/__tests__/**/*.ts",
+    "src/utils/**/*.ts",
+    "src/ai/**/*.ts",
+    "src/*.ts"
+  ]
 }
