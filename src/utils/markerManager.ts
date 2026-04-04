@@ -142,7 +142,7 @@ export function computeWorkList(
     }
   }
 
-  return ordered.slice(0, maxPerRun);
+  return ordered.slice(0, Math.max(1, maxPerRun));
 }
 
 export function verifyGenerated(
