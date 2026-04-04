@@ -21,7 +21,7 @@ interface ItBlock {
   end: number;
 }
 
-interface ErrorRange {
+export interface ErrorRange {
   start: number;
   end: number;
   message: string;
@@ -296,6 +296,49 @@ function isInsideMockFactory(pos: number, specContent: string): boolean {
   return depth > 0;
 }
 
+// JSX-related TypeScript diagnostic codes that fire when JSX syntax appears
+// inside a project compiled without --jsx.
+const JSX_DIAGNOSTIC_CODES = new Set<number>([
+  17004, // Cannot use JSX unless the '--jsx' flag is provided.
+  17001, // JSX element implicitly has type 'any' (no JSX intrinsic elements type).
+   2607, // JSX element type 'X' is not a constructor function for JSX elements.
+   2786, // 'X' cannot be used as a JSX component.
+]);
+
+// Returns true when err is a JSX-related TypeScript diagnostic — either by its
+// numeric code or by the word "jsx" appearing (case-insensitively) in its message.
+export function isJsxRelatedError(err: ErrorRange): boolean {
+  return JSX_DIAGNOSTIC_CODES.has(err.code) || err.message.toLowerCase().includes('jsx');
+}
+
+// Returns the source ranges of every jest.mock(…) / vi.mock(…) factory-function
+// argument in the given source file. The factory is the second argument of the
+// mock call — the range covers that entire argument expression so position-based
+// checks can determine whether a diagnostic falls inside a factory body.
+export function findMockFactoryRanges(
+  sourceFile: ts.SourceFile
+): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      (node.expression.expression.text === 'jest' || node.expression.expression.text === 'vi') &&
+      node.expression.name.text === 'mock' &&
+      node.arguments.length >= 2
+    ) {
+      const factory = node.arguments[1];
+      ranges.push({ start: factory.getStart(sourceFile), end: factory.getEnd() });
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return ranges;
+}
+
 function getLineNumber1Based(pos: number, content: string): number {
   return content.slice(0, pos).split('\n').length;
 }
@@ -308,6 +351,185 @@ function applyTypeCast(content: string, error: ErrorRange): string {
   const expr   = content.slice(error.start, error.end);
   const after  = content.slice(error.end);
   return `${before}(${expr} as unknown as any)${after}`;
+}
+
+/**
+ * Returns true if a tsc diagnostic output line references the given spec file.
+ * tsc output format: "path/to/file.ts(line,col): error TSXXXX: message"
+ * Matches by relative path from the tsconfig root (primary) or basename (fallback).
+ */
+export function isSpecFileLine(
+  line: string,
+  specRelativePath: string,
+  specBasename: string
+): boolean {
+  if (!line.includes(': error TS')) { return false; }
+  const parenIdx = line.indexOf('(');
+  if (parenIdx === -1) { return false; }
+  const filePart = line.slice(0, parenIdx).replace(/\\/g, '/');
+  const normRel  = specRelativePath.replace(/\\/g, '/');
+  if (filePart === normRel) { return true; }
+  if (filePart.endsWith('/' + normRel)) { return true; }   // absolute path suffix
+  if (filePart === specBasename) { return true; }
+  if (filePart.endsWith('/' + specBasename)) { return true; }
+  return false;
+}
+
+/**
+ * Returns true if a tsc diagnostic output line is a jest/vitest global false
+ * positive (TS2304 / TS2582 on a known test-framework global name).
+ * Used to apply the same filtering to shell tsc output as the Compiler API path.
+ */
+export function isShellJestGlobalError(line: string): boolean {
+  const codeMatch = line.match(/error (TS\d+):/);
+  if (!codeMatch) { return false; }
+  const code = parseInt(codeMatch[1].slice(2), 10);
+  if (code !== 2304 && code !== 2582) { return false; }
+  return Array.from(TEST_FRAMEWORK_GLOBALS).some(g => line.includes(`'${g}'`));
+}
+
+/**
+ * Runs shell tsc against the project that owns specFilePath and returns whether
+ * the spec file is error-free according to tsc, scoped only to diagnostics that
+ * reference the spec file and filtered for jest/vitest global false positives.
+ *
+ * Returns:
+ *   clean       — true when no real spec-file errors found (or tsc exited 0)
+ *   inconclusive — true when the result cannot be trusted (no tsconfig, timeout,
+ *                  all errors are from other project files, etc.)
+ */
+function shellTscVerifySpec(
+  specFilePath: string,
+  emit: (msg: string) => void
+): { clean: boolean; inconclusive: boolean } {
+  const tsconfigPath = ts.findConfigFile(
+    path.dirname(specFilePath),
+    ts.sys.fileExists,
+    'tsconfig.json'
+  );
+  if (!tsconfigPath) {
+    emit('Verify (shell): no tsconfig.json found — shell fallback skipped');
+    return { clean: true, inconclusive: true };
+  }
+
+  // Locate the project-local tsc binary by walking up from the tsconfig directory.
+  let tscBin = '';
+  let searchDir = path.dirname(tsconfigPath);
+  while (searchDir !== path.dirname(searchDir)) {
+    const candidate = path.join(searchDir, 'node_modules', '.bin', 'tsc');
+    if (fs.existsSync(candidate)) { tscBin = candidate; break; }
+    searchDir = path.dirname(searchDir);
+  }
+  const tscCmd = tscBin || 'tsc';
+
+  const tsconfigDir     = path.dirname(tsconfigPath);
+  const specRelativePath = path.relative(tsconfigDir, specFilePath).replace(/\\/g, '/');
+  const specBasename     = path.basename(specFilePath);
+
+  let rawOutput = '';
+  try {
+    execSync(`"${tscCmd}" --noEmit --project "${tsconfigPath}"`, {
+      stdio: 'pipe',
+      timeout: 10000,
+    });
+    // tsc exited 0 — whole project is clean, spec is fine
+    return { clean: true, inconclusive: false };
+  } catch (err: unknown) {
+    const e = err as { killed?: boolean; stdout?: Buffer; stderr?: Buffer };
+    if (e.killed) {
+      emit('Verify (shell): tsc timed out (>10s) — shell fallback inconclusive');
+      return { clean: true, inconclusive: true };
+    }
+    rawOutput = [
+      e.stdout ? e.stdout.toString() : '',
+      e.stderr ? e.stderr.toString() : '',
+    ].join('\n');
+  }
+
+  // Scope to lines that reference our spec file.
+  const specErrorLines = rawOutput
+    .split('\n')
+    .filter(line => isSpecFileLine(line, specRelativePath, specBasename));
+
+  if (specErrorLines.length === 0) {
+    // All tsc errors are from other project files — not actionable for this spec.
+    const totalErrorLines = rawOutput.split('\n').filter(l => l.includes(': error TS')).length;
+    if (totalErrorLines > 0) {
+      emit(`Verify (shell): ${totalErrorLines} tsc error(s) are from other project files — shell fallback inconclusive`);
+      return { clean: true, inconclusive: true };
+    }
+    return { clean: true, inconclusive: false };
+  }
+
+  // Filter jest/vitest global false positives from spec-file lines.
+  const realSpecErrors = specErrorLines.filter(line => !isShellJestGlobalError(line));
+
+  if (realSpecErrors.length === 0) {
+    emit('Verify (shell): only jest-global errors in spec — treating as clean');
+    return { clean: true, inconclusive: false };
+  }
+
+  emit(`Verify (shell): ${realSpecErrors.length} real error(s) found in spec by shell tsc`);
+  return { clean: false, inconclusive: false };
+}
+
+/**
+ * Verifies the assembled spec file on disk using the TypeScript Compiler API.
+ * Applies the same TS2304/TS2582 false-positive filter used by the healer so
+ * that missing @types for jest/vitest globals (describe, it, expect, etc.)
+ * do not incorrectly mark the file as uncompilable.
+ *
+ * When the Compiler API reports clean, a shell tsc fallback is run to catch
+ * edge cases (e.g. complex union-type errors) that the in-process compiler can
+ * miss. If the shell finds real spec-file errors the Compiler API missed, the
+ * function marks the file as not compile-ready and logs the discrepancy.
+ *
+ * Returns:
+ *   clean           — true when no real diagnostics remain after filtering
+ *   diagnosticCount — number of filtered diagnostics; −1 when verification itself
+ *                     failed or when the shell fallback found a discrepancy
+ */
+export function verifyCompilation(
+  specFilePath: string,
+  log?: (msg: string) => void
+): { clean: boolean; diagnosticCount: number } {
+  const emit = log ?? (() => {});
+  try {
+    const compilerOptions = resolveCompilerOptions(specFilePath, emit);
+    const program = ts.createProgram([specFilePath], compilerOptions);
+    const sourceFile = program.getSourceFile(specFilePath);
+    if (!sourceFile) {
+      emit(`Verify: could not load spec file from disk — ${specFilePath}`);
+      return { clean: false, diagnosticCount: -1 };
+    }
+    const diagnostics = [
+      ...program.getSyntacticDiagnostics(sourceFile),
+      ...program.getSemanticDiagnostics(sourceFile),
+    ];
+    const specContent = sourceFile.getFullText();
+    const errorRanges = buildErrorRanges(diagnostics, sourceFile);
+    const realErrors = errorRanges.filter(err => !isTestFrameworkGlobalError(err, specContent));
+
+    // When the Compiler API reports clean, run shell tsc as a fallback to catch
+    // edge cases such as complex union-type errors that the in-process compiler
+    // can miss (e.g. certain OpenAI-generated TS2345 patterns).
+    if (realErrors.length === 0) {
+      const shell = shellTscVerifySpec(specFilePath, emit);
+      if (!shell.inconclusive && !shell.clean) {
+        emit('Verify: Compiler API reported clean but shell tsc found real errors in spec — marking not compile-ready (API/shell discrepancy)');
+        return { clean: false, diagnosticCount: -1 };
+      }
+      if (shell.inconclusive) {
+        emit('Verify: shell tsc fallback inconclusive — using Compiler API result (clean)');
+      }
+    }
+
+    emit(`Verify: ${realErrors.length} real diagnostic(s) in assembled spec`);
+    return { clean: realErrors.length === 0, diagnosticCount: realErrors.length };
+  } catch (err) {
+    emit(`Verify: compilation check failed — ${err instanceof Error ? err.message : String(err)}`);
+    return { clean: false, diagnosticCount: -1 };
+  }
 }
 
 export function healSpec(
@@ -403,22 +625,23 @@ export function healSpec(
     const itBlocks       = findItBlocks(sourceFile);
     const describeBlocks = findDescribeBlocks(sourceFile);
 
-    // ── Early bail — missing @types package ───────────────────────────────
-    // TS2582/TS2304 on test globals (describe, it, expect, etc.) means the
-    // @types/<framework> package is not installed. The healer cannot fix this —
-    // preserve all generated tests untouched and signal the caller to notify.
+    // ── Pass 1: identify jest/vitest global environment diagnostics ──────────
+    // TS2582/TS2304 on known test globals signals that @types/jest or
+    // @types/vitest may be missing. We record this and switch to safe mode so
+    // tests are not removed, but we do NOT short-circuit — real diagnostics
+    // (TS2345, TS2322, TS2339, etc.) in the same file still need to be
+    // classified and, where possible, repaired in Pass 2.
     const missingTypeDiags = errorRanges.filter(err =>
       isTestFrameworkGlobalError(err, specContent)
     );
-    if (missingTypeDiags.length > 0) {
-      const fw = framework ?? 'jest';
-      emit(`Healer: TS2582/TS2304 on test globals — @types/${fw} may be missing. Preserving generated tests untouched.`);
-      return {
-        healed: specContent, removedTests: [], removedTestReasons: {},
-        errorCount: diagnostics.length, wasHealed: false, healedCount: 0,
-        hasGlobalErrors: false, missingTypes: true, framework: fw,
-      };
+    const activeMissingTypes = missingTypeDiags.length > 0;
+    const fw = framework ?? 'jest';
+    if (activeMissingTypes) {
+      emit(`Healer: TS2582/TS2304 on test globals — @types/${fw} may be missing. Switching to safe mode for pass 2.`);
     }
+    // Safe mode is active when the caller requested it OR when jest-global
+    // environment errors were found in Pass 1.
+    const effectiveMode = activeMissingTypes ? 'safe' : mode;
 
     // ── Log test-framework global false positives ──────────────────────────
     const falsePositiveCount = errorRanges.filter(err =>
@@ -486,7 +709,29 @@ export function healSpec(
 
     const workLines = workContent.split('\n');
 
-    for (const err of finalOutsideItErrors) {
+    // ── Filter JSX false positives inside mock factory bodies ────────────────
+    // JSX syntax (e.g. <Component />) inside jest.mock()/vi.mock() factories
+    // triggers diagnostics (TS17004, TS17001, TS2607, TS2786) when the project
+    // does not enable --jsx. These are false positives — the test runner handles
+    // JSX at runtime via its own transform. We use an AST-based range check so
+    // that positions are accurate even when workContent has been modified by casts.
+    const workSourceFile = workContent !== specContent
+      ? ts.createSourceFile(specFileName, workContent, ts.ScriptTarget.Latest, true)
+      : sourceFile;
+    const mockFactoryRanges = findMockFactoryRanges(workSourceFile);
+    const jsxMockFalsePositives = finalOutsideItErrors.filter(err =>
+      isJsxRelatedError(err) &&
+      mockFactoryRanges.some(r => err.start >= r.start && err.start <= r.end)
+    );
+    if (jsxMockFalsePositives.length > 0) {
+      emit(`Healer: ${jsxMockFalsePositives.length} JSX diagnostic(s) inside mock factory — ignoring`);
+    }
+    const jsxFPSet = jsxMockFalsePositives.length > 0 ? new Set(jsxMockFalsePositives) : null;
+    const classifiedErrors = jsxFPSet
+      ? finalOutsideItErrors.filter(err => !jsxFPSet.has(err))
+      : finalOutsideItErrors;
+
+    for (const err of classifiedErrors) {
       const lineNum   = getLineNumber1Based(err.start, workContent);
       const lineIndex = lineNum - 1;
       const lineText  = workLines[lineIndex] ?? '';
@@ -537,6 +782,7 @@ export function healSpec(
       return {
         healed: specContent, removedTests: [], removedTestReasons: {},
         errorCount: diagnostics.length, wasHealed: false, healedCount: 0, hasGlobalErrors: true,
+        ...(activeMissingTypes ? { missingTypes: true, framework: fw } : {}),
       };
     }
 
@@ -549,6 +795,7 @@ export function healSpec(
         healed: workContent, removedTests: [], removedTestReasons: {},
         errorCount: diagnostics.length, wasHealed: workContent !== specContent,
         healedCount: workContent !== specContent ? 1 : 0, hasGlobalErrors: false,
+        ...(activeMissingTypes ? { missingTypes: true, framework: fw } : {}),
       };
     }
 
@@ -563,9 +810,9 @@ export function healSpec(
     const removedTestReasons: Record<string, string> = {};
     let healedCount = 0;
 
-    // Capture safe mode as a boolean so TypeScript does not narrow it away
-    // after a conditional return — we need it inside the removal loop below.
-    const inSafeMode = mode === 'safe';
+    // Capture effective safe mode as a boolean so TypeScript does not narrow it
+    // away after a conditional return — we need it inside the removal loop below.
+    const inSafeMode = effectiveMode === 'safe';
 
     const sortedBlocks = [...blocksWithErrors].sort((a, b) => b.start - a.start);
 
@@ -636,6 +883,7 @@ export function healSpec(
       healed, removedTests, removedTestReasons,
       errorCount: diagnostics.length, wasHealed: healedCount > 0,
       healedCount, hasGlobalErrors,
+      ...(activeMissingTypes ? { missingTypes: true, framework: fw } : {}),
     };
 
   } catch (err) {
