@@ -9,6 +9,7 @@ import { createHash } from 'crypto';
 import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import { readMarker, updateMarkerOnly } from './utils/markerManager';
+import { isUnmanagedSpec } from './utils/unmanagedSpec';
 
 const execAsync = promisify(execCb);
 
@@ -411,7 +412,8 @@ async function handleFileSave(
     exportedFunctions: string[],
     exportTypes: Record<string, 'default' | 'named'>
   ) => Promise<void>,
-  isAutoGapFill: boolean = false
+  isAutoGapFill: boolean = false,
+  earlyGuard?: (filePath: string) => string | null
 ): Promise<void> {
   try {
     // Phase 1 — read file content asynchronously
@@ -458,15 +460,28 @@ async function handleFileSave(
       return;
     }
 
+    // FIX B — early processing-lock / queue-depth check (before AST to avoid wasted work)
+    if (earlyGuard) {
+      const earlySkipReason = earlyGuard(filePath);
+      if (earlySkipReason !== null) { log(earlySkipReason); return; }
+    }
+
     // Phase 2 — AST gate
     const astResult = await phaseAST(filePath, updateStatus);
     if (!astResult) { return; }
 
+    // Phase 4 — spec path resolution (moved before Phase 3 to enable early unmanaged-spec guard)
+    const resolvedSpecPath = await resolveSpecPath(filePath, log);
+
+    // FIX C — early unmanaged-spec guard: skip before context extraction and preflight
+    if (await isUnmanagedSpec(resolvedSpecPath)) {
+      log('Spec file: not managed by SilentSpec — skipping');
+      return;
+    }
+
     // Phase 3 — context extraction (with full export list — work list stamped later)
     const ctx = phaseContext(astResult, filePath);
-
-    // Phase 4 — spec path resolution
-    await phaseSpecPath(ctx, filePath);
+    ctx.specPath = resolvedSpecPath;
 
     // Phase 4.5 — preflight: check test environment, enable degraded mode if needed.
     // Runs once per successfully verified project root per session.
@@ -651,7 +666,8 @@ export function registerSaveHandler(
     abortSignal: AbortSignal,
     exportedFunctions: string[],
     exportTypes: Record<string, 'default' | 'named'>
-  ) => Promise<void>
+  ) => Promise<void>,
+  earlyGuard?: (filePath: string) => string | null
 ): void {
   log('SilentSpec save handler registered');
 
@@ -687,7 +703,7 @@ export function registerSaveHandler(
 
       const timer = setTimeout(() => {
         debounceTimers.delete(filePath);
-        void handleFileSave(filePath, updateStatus, onPromptReady);
+        void handleFileSave(filePath, updateStatus, onPromptReady, false, earlyGuard);
       }, 2000);
 
       debounceTimers.set(filePath, timer);
