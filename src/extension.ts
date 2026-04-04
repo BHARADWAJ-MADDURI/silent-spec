@@ -9,12 +9,12 @@ import { OllamaProvider } from './ai/ollamaProvider';
 import { GitHubModelsProvider } from './ai/githubModelsProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
-import { writeSpecFile, appendGapTests, resolveSpecPath, updateMarker } from './fileWriter';
+import { writeSpecFile, appendGapTests, resolveSpecPath, updateMarker, isUnmanagedSpec } from './fileWriter';
 import { runGapFinder } from './gapFinder';
 import { buildPrompt } from './promptBuilder';
 import { extractContext, SilentSpecContext } from './contextExtractor';
 import { TelemetryService } from './telemetry';
-import { healSpec } from './utils/specHealer';
+import { healSpec, verifyCompilation } from './utils/specHealer';
 import {
   SSMarker,
   readMarker,
@@ -28,8 +28,12 @@ import {
 } from './utils/markerManager';
 
 const activeControllers = new Set<AbortController>();
+const activeTimers = new Set<ReturnType<typeof setTimeout>>();
 let costCheckInProgress = false;
 let cachedOllamaRunning: boolean | null = null;
+// V1 limitation: SilentSpec uses Node fs/child_process which may not work
+// correctly in Remote SSH, Dev Containers, or WSL. Warn once per session.
+let remoteWarningShown = false;
 // Project roots where the "Copy Fix Command" notification has been shown this session.
 // Prevents repeated notifications on every save when @types is missing.
 const typesWarningShownRoots = new Set<string>();
@@ -182,7 +186,7 @@ function fixImportStatement(validated: string, filePath: string, specPath: strin
   const sourceBaseName = path.basename(filePath, path.extname(filePath));
   const specDir = path.dirname(specPath);
   const sourceDir = path.dirname(filePath);
-  let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName));
+  let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName)).split(path.sep).join('/');
   if (!relativePath.startsWith('.')) { relativePath = './' + relativePath; }
   const defaultExport = exportedFunctions.find(f => exportTypes[f] === 'default');
   const namedExports = exportedFunctions.filter(f => exportTypes[f] === 'named');
@@ -256,12 +260,13 @@ async function runOneGapBatch(
     const updatedMarker = buildUpdatedMarker(reconciled.covered, nowCovered, nowPending);
     await appendGapTests(filePath, finalContent, updatedMarker, log);
     telemetry.recordSuccess(providerName, nowCovered, nowPending);
-    const gapSpecCompileReady = !healResult.missingTypes && !healResult.hasGlobalErrors;
-    const gapSpecReason = healResult.missingTypes
-      ? `missing ${ctx.framework} typings`
-      : healResult.hasGlobalErrors
-        ? 'global TypeScript errors'
-        : 'ok';
+    const diskVerify = verifyCompilation(specPath, log);
+    const gapSpecCompileReady = diskVerify.clean;
+    const gapSpecReason = diskVerify.clean
+      ? 'ok'
+      : diskVerify.diagnosticCount < 0
+        ? 'verification failed'
+        : `${diskVerify.diagnosticCount} diagnostic(s) in assembled spec`;
     log(`[SilentSpec] Spec written: yes`);
     log(`[SilentSpec] Spec compile-ready: ${gapSpecCompileReady ? 'yes' : 'no'}`);
     log(`[SilentSpec] Reason: ${gapSpecReason}`);
@@ -270,6 +275,13 @@ async function runOneGapBatch(
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  if (vscode.env.remoteName && !remoteWarningShown) {
+    remoteWarningShown = true;
+    void vscode.window.showInformationMessage(
+      'SilentSpec V1 is designed for local development. Some features may not work correctly in remote environments (SSH, Containers, WSL).'
+    );
+  }
+
   let installDate = context.globalState.get<string>('silentspec.installDate');
   if (!installDate) {
     installDate = new Date().toISOString();
@@ -463,7 +475,7 @@ export function activate(context: vscode.ExtensionContext) {
           updateStatusBar();
           const provider = await getActiveProvider();
           const canProceed = await checkCostAcknowledgement(context, providerName);
-          if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
+          if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
           let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full');
           while (pendingToResume.length > 0) {
             const retryable = filterRetryable(pendingToResume, pendingToResume, log);
@@ -474,7 +486,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
           log('Gap Finder: done');
           updateStatusBar('$(check) Done');
-          setTimeout(() => updateStatusBar(), 3000);
+          { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
         });
       }
     );
@@ -491,6 +503,16 @@ export function activate(context: vscode.ExtensionContext) {
       processingLock.add(filePath);
       try {
         const specPath = ctx.specPath ?? await resolveSpecPath(filePath);
+
+        // ── Early unmanaged-spec guard ────────────────────────────────────────
+        // Skip before any generation work if the resolved spec file already
+        // exists and is not managed by SilentSpec. writeSpecFile() keeps its own
+        // identical check as a final safety net — this one avoids a wasted API call.
+        if (await isUnmanagedSpec(specPath)) {
+          log('Spec file: not managed by SilentSpec — skipping');
+          return;
+        }
+
         let existingCovered: string[] = [];
         let previousPending: string[] = [];
         try { const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath)); const { marker } = readMarker(Buffer.from(bytes).toString('utf8')); existingCovered = marker?.covered ?? []; previousPending = marker?.pending ?? []; } catch { /* first run */ }
@@ -526,11 +548,11 @@ export function activate(context: vscode.ExtensionContext) {
         ctx.workList = workList;
         log(`Batch size: ${batchSize} (file: ${ctx.fileContent.length} chars, user max: ${maxPerRun})`);
         log(`Work list: [${workList.join(', ')}] (${workList.length}/${exportedFunctions.length} functions)`);
-        const prompt = buildPrompt(ctx);
-
         const provider = await getActiveProvider();
         const canProceed = await checkCostAcknowledgement(context, providerName);
-        if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); setTimeout(() => updateStatusBar(), 3000); return; }
+        if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
+
+        const prompt = buildPrompt(ctx);
 
         // Fix 3 — pre-flight types warning notification (Improvement 1/3).
         // Does not block generation — we proceed in safe mode.
@@ -668,7 +690,8 @@ export function activate(context: vscode.ExtensionContext) {
           const isAddingOnlyNewFunctions = workList.every(fn => !existingCovered.includes(fn)) && existingCovered.length > 0;
           const writeMode = isAddingOnlyNewFunctions ? 'append' : 'replace';
           log(`Write mode: ${writeMode} (${workList.length}/${exportedFunctions.length} functions)`);
-          await writeSpecFile(filePath, finalContent, log, updatedMarker, exportedFunctions, writeMode);
+          const specWritten = await writeSpecFile(filePath, finalContent, log, updatedMarker, exportedFunctions, writeMode);
+          if (!specWritten) { return; }
           telemetry.recordSuccess(providerName, nowCovered, nowPending);
           failureNotifiedFiles.delete(filePath); // clear so next failure re-notifies
           const specCompileReady = !healResult.missingTypes && !healResult.hasGlobalErrors;
@@ -727,19 +750,58 @@ export function activate(context: vscode.ExtensionContext) {
                   const notYetAttempted = missing.filter(f => !nowPending.includes(f));
                   if (notYetAttempted.length > 0) {
                     gapFillScheduled = true;
-                    log(`Auto-scheduling next batch for [${notYetAttempted.join(', ')}]...`);
-                    setTimeout(() => {
-                      processingQueue.enqueue(async () => {
-                        log(`Auto-gap-fill: generating batch for [${notYetAttempted.join(', ')}]`);
-                        updateStatusBar(`$(sync~spin) Generating... (${notYetAttempted.length} pending)...`);
-                        await runOneGapBatch(filePath, exportedFunctions, exportTypes, notYetAttempted, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
-                        log('[SilentSpec] Auto-gap-fill complete');
+
+                    // Iterative gap-fill loop — runs one batch, re-reads the live marker,
+                    // and schedules another batch until all functions are covered or every
+                    // remaining function has hit the per-function retry cap (MAX_RETRIES_PER_FUNCTION).
+                    const scheduleGapBatch = (toGenerate: string[], prevBatch: string[]) => {
+                      const retryable = filterRetryable(toGenerate, prevBatch, log);
+                      if (retryable.length === 0) {
+                        log('Auto-gap-fill: all remaining functions hit retry cap — stopping');
+                        gapFillScheduled = false;
                         if (activeGenerations === 0) {
                           updateStatusBar('$(check) Done');
-                          setTimeout(() => updateStatusBar(), 3000);
+                          { const _t2 = setTimeout(() => { activeTimers.delete(_t2); updateStatusBar(); }, 3000); activeTimers.add(_t2); }
                         }
-                      });
-                    }, 2000);
+                        return;
+                      }
+                      log(`Auto-scheduling next batch for [${retryable.join(', ')}]...`);
+                      { const _t = setTimeout(() => { activeTimers.delete(_t);
+                        processingQueue.enqueue(async () => {
+                          log(`Auto-gap-fill: generating batch for [${retryable.join(', ')}]`);
+                          updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
+                          await runOneGapBatch(filePath, exportedFunctions, exportTypes, retryable, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
+                          log('[SilentSpec] Auto-gap-fill complete');
+                          // Re-read coverage from the live marker to decide whether to continue
+                          try {
+                            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+                            const { marker: latestMarker } = readMarker(Buffer.from(bytes).toString('utf8'));
+                            const stillMissing = latestMarker
+                              ? exportedFunctions.filter(f => !latestMarker.covered.includes(f))
+                              : [];
+                            if (stillMissing.length === 0) {
+                              log('Auto-gap-fill: all functions covered');
+                              gapFillScheduled = false;
+                              if (activeGenerations === 0) {
+                                updateStatusBar('$(check) Done');
+                                { const _t2 = setTimeout(() => { activeTimers.delete(_t2); updateStatusBar(); }, 3000); activeTimers.add(_t2); }
+                              }
+                            } else {
+                              log(`Auto-gap-fill: ${stillMissing.length} function(s) still uncovered — scheduling next batch`);
+                              scheduleGapBatch(stillMissing, retryable);
+                            }
+                          } catch {
+                            gapFillScheduled = false;
+                            if (activeGenerations === 0) {
+                              updateStatusBar('$(check) Done');
+                              { const _t2 = setTimeout(() => { activeTimers.delete(_t2); updateStatusBar(); }, 3000); activeTimers.add(_t2); }
+                            }
+                          }
+                        });
+                      }, 2000); activeTimers.add(_t); }
+                    };
+
+                    scheduleGapBatch(notYetAttempted, []); // [] = first attempt, count starts at 1
                   }
                 } else {
                   generationStatus = `$(check) Done — ${finalMarker.covered.length} covered`;
@@ -759,18 +821,24 @@ export function activate(context: vscode.ExtensionContext) {
             // Skip the idle-reset timeout when a gap fill batch is scheduled —
             // it will set its own generating status when it starts.
             if (!gapFillScheduled) {
-              setTimeout(() => updateStatusBar(), 3000);
+              { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
             }
           }
         }
       } finally { processingLock.delete(filePath); }
     });
+  }, (fp: string): string | null => {
+    if (processingLock.has(fp)) { return `Skipped: already processing ${path.basename(fp)}`; }
+    if (processingQueue.size >= MAX_QUEUE_DEPTH) { return `Skipped: queue full (${processingQueue.size}/${MAX_QUEUE_DEPTH}) — ${path.basename(fp)}`; }
+    return null;
   });
 
   context.subscriptions.push(outputChannel);
 }
 
 export function deactivate() {
+  for (const t of activeTimers) { clearTimeout(t); }
+  activeTimers.clear();
   for (const controller of activeControllers) { controller.abort(); }
   activeControllers.clear();
   pendingRetryCount.clear();
