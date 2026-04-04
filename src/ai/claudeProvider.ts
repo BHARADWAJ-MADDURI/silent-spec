@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
+import { redactSecrets } from '../utils/validateResponse';
 
 // Model is intentionally empty — resolved at runtime from user settings.
 // Fallback is the current recommended Claude model.
@@ -109,14 +110,14 @@ export class ClaudeProvider implements AIProvider {
         }
 
         if (response.status === 429) {
-          log(`Error: Claude rate limit hit (429) — ${errorBody}`);
+          log(`Error: Claude rate limit hit (429) — ${redactSecrets(errorBody)}`);
           void vscode.window.showWarningMessage(
             'SilentSpec: Claude rate limit reached. Try again in a moment or switch providers.'
           );
           return null;
         }
 
-        log(`Error: Claude API returned ${response.status} — ${errorBody}`);
+        log(`Error: Claude API returned ${response.status} — ${redactSecrets(errorBody)}`);
         return null;
       }
 

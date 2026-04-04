@@ -1,3 +1,20 @@
+/**
+ * Redacts high-confidence secret patterns from a string before it is logged.
+ * Targets: Bearer tokens, sk-... keys, ghp_... GitHub tokens, key-... prefixed tokens.
+ * Non-secret content (error messages, status codes, endpoint URLs) passes through unchanged.
+ */
+export function redactSecrets(message: string): string {
+  return message
+    // Bearer tokens in Authorization headers or response bodies
+    .replace(/Bearer\s+\S{20,}/g, 'Bearer [REDACTED]')
+    // OpenAI / Anthropic API keys: sk-<20+ alphanumeric/dash/underscore chars>
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]')
+    // GitHub personal access tokens: ghp_<36+ alphanumeric chars>
+    .replace(/\bghp_[A-Za-z0-9]{36,}/g, 'ghp_[REDACTED]')
+    // Generic key- prefixed tokens: key-<20+ alphanumeric/dash/underscore chars>
+    .replace(/\bkey-[A-Za-z0-9_-]{20,}/g, 'key-[REDACTED]');
+}
+
 export function validateResponse(
   raw: string,
   log: (msg: string) => void

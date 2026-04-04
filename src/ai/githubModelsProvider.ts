@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
+import { redactSecrets } from '../utils/validateResponse';
 
 // Model is intentionally empty — resolved at runtime from user settings.
 // Fallback is the current recommended GitHub Models default.
@@ -113,14 +114,14 @@ export class GitHubModelsProvider implements AIProvider {
         }
 
         if (response.status === 429) {
-          log(`Error: GitHub Models rate limit hit (429) — ${errorBody}`);
+          log(`Error: GitHub Models rate limit hit (429) — ${redactSecrets(errorBody)}`);
           void vscode.window.showWarningMessage(
             'SilentSpec: GitHub Models rate limit reached. Free tier is 50 requests/day. Try again tomorrow or switch to Claude/OpenAI.'
           );
           return null;
         }
 
-        log(`Error: GitHub Models API returned ${response.status} — ${errorBody}`);
+        log(`Error: GitHub Models API returned ${response.status} — ${redactSecrets(errorBody)}`);
         return null;
       }
 
