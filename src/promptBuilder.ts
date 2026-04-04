@@ -74,7 +74,7 @@ function buildImportSection(ctx: SilentSpecContext): string {
   const specDir = path.dirname(specPath);
   const sourceDir = path.dirname(filePath);
 
-  let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName));
+  let relativePath = path.relative(specDir, path.join(sourceDir, sourceBaseName)).split(path.sep).join('/');
   if (!relativePath.startsWith('.')) { relativePath = './' + relativePath; }
 
   const defaultExport = exportedFunctions.find(f => exportTypes[f] === 'default');
