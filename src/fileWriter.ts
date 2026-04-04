@@ -10,6 +10,7 @@ import {
   splitAIOutput,
   updateMarkerOnly,
 } from './utils/markerManager';
+import { isUnmanagedContent } from './utils/unmanagedSpec';
 
 // ─── 4-Block Zone Structure ───────────────────────────────────────────────────
 //
@@ -42,6 +43,11 @@ const SS_USER_END      = '// </SS-USER-TESTS>';
 const SS_USER_PLACEHOLDER = '// Add your own tests here — SilentSpec will never modify this section';
 
 const TEST_DIRS = ['__tests__', 'tests', 'test', 'specs'];
+
+// ─── Unmanaged-spec detection ─────────────────────────────────────────────────
+// isUnmanagedContent and isUnmanagedSpec live in utils/unmanagedSpec.ts so they
+// have no vscode dependency and can be unit-tested with plain strings.
+export { isUnmanagedContent, isUnmanagedSpec } from './utils/unmanagedSpec';
 
 // ─── Header ───────────────────────────────────────────────────────────────────
 
@@ -197,6 +203,9 @@ function mergeImportBlocks(base: string, additions: string, specDir: string, log
   const seenBasenames = new Set<string>();  // secondary: basename of relative imports
   const seenMockPaths = new Set<string>();
   const resultLines: string[] = [];
+  // Maps normalized module path → resultLines index for single-line base imports.
+  // Used to merge addition specifiers in-place rather than dropping them.
+  const baseImportAt  = new Map<string, number>();
 
   function normalizeModulePath(modulePath: string): string {
     return modulePath.startsWith('.') ? path.resolve(specDir, modulePath) : modulePath;
@@ -207,13 +216,101 @@ function mergeImportBlocks(base: string, additions: string, specDir: string, log
     return path.basename(modulePath).replace(/\.[tj]sx?$/, '');
   }
 
+  // Parse a single-line import into its structural parts.
+  // Returns null for multiline or unrecognised forms.
+  function parseSingleLineImport(line: string): {
+    typeOnly: boolean; isNamespace: boolean; isSideEffect: boolean;
+    defaultImport: string | null; namedSpecifiers: string[];
+    modulePath: string; quote: string;
+  } | null {
+    const t = line.trim();
+    if (!t.startsWith('import ')) { return null; }
+    // Side-effect: import 'module'
+    const sideEffect = t.match(/^import\s+(['"])([^'"]+)\1\s*;?$/);
+    if (sideEffect) {
+      return { typeOnly: false, isNamespace: false, isSideEffect: true,
+               defaultImport: null, namedSpecifiers: [],
+               modulePath: sideEffect[2], quote: sideEffect[1] };
+    }
+    const typeOnly = /^import\s+type\s/.test(t);
+    const body = typeOnly ? t.replace(/^import\s+type\s+/, 'import ') : t;
+    // Namespace: import * as X from '...'
+    const nsM = body.match(/^import\s+\*\s+as\s+(\w+)\s+from\s+(['"])([^'"]+)\2/);
+    if (nsM) {
+      return { typeOnly, isNamespace: true, isSideEffect: false,
+               defaultImport: nsM[1], namedSpecifiers: [],
+               modulePath: nsM[3], quote: nsM[2] };
+    }
+    const quoteM = body.match(/from\s+(['"])([^'"]+)\1/);
+    if (!quoteM) { return null; }
+    const quote = quoteM[1];
+    const modulePath = quoteM[2];
+    // Default + named: import Foo, { bar } from '...'
+    const defaultNamed = body.match(/^import\s+(\w+)\s*,\s*\{([^}]*)\}\s+from/);
+    if (defaultNamed) {
+      return { typeOnly, isNamespace: false, isSideEffect: false,
+               defaultImport: defaultNamed[1],
+               namedSpecifiers: defaultNamed[2].split(',').map(s => s.trim()).filter(Boolean),
+               modulePath, quote };
+    }
+    // Named only: import { foo, bar } from '...'
+    const namedOnly = body.match(/^import\s+\{([^}]*)\}\s+from/);
+    if (namedOnly) {
+      return { typeOnly, isNamespace: false, isSideEffect: false,
+               defaultImport: null,
+               namedSpecifiers: namedOnly[1].split(',').map(s => s.trim()).filter(Boolean),
+               modulePath, quote };
+    }
+    // Default only: import Foo from '...'
+    const defaultOnly = body.match(/^import\s+(\w+)\s+from/);
+    if (defaultOnly) {
+      return { typeOnly, isNamespace: false, isSideEffect: false,
+               defaultImport: defaultOnly[1], namedSpecifiers: [], modulePath, quote };
+    }
+    return null;
+  }
+
+  // Attempt to merge addLine's specifiers into resultLines[idx].
+  // Returns the merged line on success, or null when the two imports are
+  // incompatible and must stay as separate statements.
+  function tryMerge(idx: number, addLine: string): string | null {
+    const b = parseSingleLineImport(resultLines[idx]);
+    const a = parseSingleLineImport(addLine);
+    if (!b || !a) { return null; }
+    if (b.isSideEffect  || a.isSideEffect)  { return null; } // side-effect — keep separate
+    if (b.isNamespace   || a.isNamespace)   { return null; } // namespace   — keep separate
+    if (b.typeOnly      !== a.typeOnly)     { return null; } // type vs value — keep separate
+    if (b.defaultImport && a.defaultImport && b.defaultImport !== a.defaultImport) {
+      log?.(`Import merge: conflicting default imports for '${b.modulePath}' — keeping both`);
+      return null;
+    }
+    const mergedDefault = b.defaultImport ?? a.defaultImport;
+    const seenSpec = new Set(b.namedSpecifiers);
+    const merged   = [...b.namedSpecifiers, ...a.namedSpecifiers.filter(s => !seenSpec.has(s))];
+    const prefix   = b.typeOnly ? 'import type ' : 'import ';
+    const q        = b.quote;
+    if (mergedDefault && merged.length > 0) {
+      return `${prefix}${mergedDefault}, { ${merged.join(', ')} } from ${q}${b.modulePath}${q};`;
+    } else if (mergedDefault) {
+      return `${prefix}${mergedDefault} from ${q}${b.modulePath}${q};`;
+    } else {
+      return `${prefix}{ ${merged.join(', ')} } from ${q}${b.modulePath}${q};`;
+    }
+  }
+
   // Collect all module paths and mock paths from base imports
   for (const line of base.split('\n')) {
     const fromMatch = line.match(/from\s+['"]([^'"]+)['"]/);
     if (fromMatch) {
-      seenPaths.add(normalizeModulePath(fromMatch[1]));
+      const normalized = normalizeModulePath(fromMatch[1]);
+      seenPaths.add(normalized);
       const bn = relativeBasename(fromMatch[1]);
       if (bn) { seenBasenames.add(bn); }
+      // Track single-line, mergeable base imports so additions can merge into them.
+      const parsed = parseSingleLineImport(line);
+      if (parsed && !parsed.isNamespace && !parsed.isSideEffect) {
+        baseImportAt.set(normalized, resultLines.length);
+      }
     }
     const mockMatch = line.trim().match(/^(?:vi|jest)\.mock\s*\(\s*['"]([^'"]+)['"]/);
     if (mockMatch) { seenMockPaths.add(normalizeModulePath(mockMatch[1])); }
@@ -222,7 +319,7 @@ function mergeImportBlocks(base: string, additions: string, specDir: string, log
 
   if (base.trim()) { resultLines.push(''); } // blank line separator
 
-  // Add only imports/mocks from additions that are new and not filtered
+  // Add only imports/mocks from additions that are new — or merge into existing
   let inMultiline = false;
   let pendingLines: string[] = [];
 
@@ -237,6 +334,7 @@ function mergeImportBlocks(base: string, additions: string, specDir: string, log
         const normalized = normalizeModulePath(m[1]);
         const bn         = relativeBasename(m[1]);
         if (seenPaths.has(normalized) || (bn !== null && seenBasenames.has(bn))) {
+          // Multiline addition from a seen path: merging multiline is unsupported — skip
           log?.(`Import dedup: '${m[1]}' skipped (already seen as '${normalized}')`);
         } else {
           seenPaths.add(normalized);
@@ -260,11 +358,30 @@ function mergeImportBlocks(base: string, additions: string, specDir: string, log
       const normalized = normalizeModulePath(fromMatch[1]);
       const bn         = relativeBasename(fromMatch[1]);
       if (seenPaths.has(normalized) || (bn !== null && seenBasenames.has(bn))) {
-        log?.(`Import dedup: '${fromMatch[1]}' skipped (already seen as '${normalized}')`);
+        // Path already seen — try to merge specifiers rather than drop the import
+        const baseIdx = baseImportAt.get(normalized);
+        if (baseIdx !== undefined) {
+          const merged = tryMerge(baseIdx, line);
+          if (merged !== null) {
+            resultLines[baseIdx] = merged;
+            log?.(`Import merge: merged '${fromMatch[1]}' into existing import`);
+          } else {
+            // Incompatible or conflicting — keep both (addition added as new line)
+            resultLines.push(line);
+          }
+        } else {
+          // Base import was multiline or namespace — cannot merge; skip addition
+          log?.(`Import dedup: '${fromMatch[1]}' skipped (already seen as '${normalized}')`);
+        }
       } else {
         seenPaths.add(normalized);
         if (bn !== null) { seenBasenames.add(bn); }
         resultLines.push(line);
+        // Track this newly-added import so later additions can merge into it too
+        const parsed = parseSingleLineImport(line);
+        if (parsed && !parsed.isNamespace && !parsed.isSideEffect) {
+          baseImportAt.set(normalized, resultLines.length - 1);
+        }
       }
     } else if (t.startsWith('import ')) {
       // Start of multiline import
@@ -634,13 +751,17 @@ async function writeSpecFileToPath(
       const startPos = doc.positionAt(targetedRange.startIdx);
       const endPos   = doc.positionAt(targetedRange.endIdx);
       edit.replace(specUri, new vscode.Range(startPos, endPos), targetedRange.newBlock);
-      await vscode.workspace.applyEdit(edit);
+      if (!await vscode.workspace.applyEdit(edit)) {
+        throw new Error(`applyEdit failed for ${specPath} (targeted splice)`);
+      }
       await doc.save();
       log(`Updated: ${path.basename(specPath)} (targeted splice)`);
     } else {
       const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
       edit.replace(specUri, fullRange, finalContent);
-      await vscode.workspace.applyEdit(edit);
+      if (!await vscode.workspace.applyEdit(edit)) {
+        throw new Error(`applyEdit failed for ${specPath} (full replace)`);
+      }
       await doc.save();
       if (isNew) {
         log(`Created: ${path.basename(specPath)}`);
@@ -678,7 +799,7 @@ export async function writeSpecFile(
   marker: SSMarker,
   exportedFunctions?: string[],
   mode: 'replace' | 'append' = 'replace'
-): Promise<void> {
+): Promise<boolean> {
   const specPath = await resolveSpecPath(sourcePath, log);
   const { importsBlock, helpersBlock, testsBlock: generatedBlock } = splitAIOutput(aiOutput, marker);
 
@@ -692,13 +813,15 @@ export async function writeSpecFile(
     const edit    = new vscode.WorkspaceEdit();
     const content = buildFullFile(
       importsBlock, helpersBlock, SS_USER_PLACEHOLDER, generatedBlock,
-      sourcePath, exportedFunctions
+      sourcePath, marker.covered   // only functions actually covered in this generation
     );
     edit.createFile(specUri, { overwrite: false, ignoreIfExists: false });
-    await vscode.workspace.applyEdit(edit);
+    if (!await vscode.workspace.applyEdit(edit)) {
+      throw new Error(`applyEdit failed to create spec file: ${specPath}`);
+    }
     await writeSpecFileToPath(specPath, content, log, undefined, true);
     log(`New spec created — ${markerSummary}`);
-    return;
+    return true;
   }
 
   // Read existing file
@@ -708,26 +831,20 @@ export async function writeSpecFile(
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     log(`Warning: could not read existing spec (${msg}) — skipping`);
-    return;
+    return false;
   }
 
   if (existing.includes('<<<<<<<')) {
     log('Warning: Git conflict markers detected — skipping write');
     void vscode.window.showWarningMessage('SilentSpec: Resolve Git conflicts before regenerating.');
-    return;
+    return false;
   }
 
   // Guard: unmanaged spec file — has neither SilentSpec header nor any SS marker.
-  // If neither indicator is present, this is a hand-written test file — do not touch it.
-  const hasSilentSpecHeader = existing.includes('// @auto-generated by SilentSpec');
-  const hasAnySSMarker =
-    existing.includes(SS_IMPORTS_START) || existing.includes(SS_IMPORTS_END) ||
-    existing.includes(SS_HELPERS_START) || existing.includes(SS_HELPERS_END) ||
-    existing.includes(SS_USER_START)    || existing.includes(SS_USER_END) ||
-    existing.includes(SS_START_PREFIX)  || existing.includes(SS_END);
-  if (!hasSilentSpecHeader && !hasAnySSMarker) {
+  // isUnmanagedContent is the shared detection logic; this call is the final safety net.
+  if (isUnmanagedContent(existing)) {
     log('Spec file: not managed by SilentSpec — skipping');
-    return;
+    return false;
   }
 
   // Guard: detect broken SS marker structure before any write or migration
@@ -744,19 +861,19 @@ export async function writeSpecFile(
 
     if (startCount > 1) {
       log('Spec file: duplicate SS-GENERATED-START marker');
-      return;
+      return false;
     }
     if (hasStart && !hasEnd) {
       log('Spec file: missing SS-GENERATED-END marker');
-      return;
+      return false;
     }
     if (!hasStart && hasEnd) {
       log('Spec file: missing SS-GENERATED-END marker');
-      return;
+      return false;
     }
     if (hasStart && hasEnd && endIdx < startIdx) {
       log('Spec file: markers out of order');
-      return;
+      return false;
     }
   }
 
@@ -766,13 +883,21 @@ export async function writeSpecFile(
     const endIdx = existing.indexOf('// <SS-GENERATED-END>');
     if (startIdx < endIdx && !hasFullStructure(existing)) {
       log('Spec file: incomplete zone structure — skipping write');
-      return;
+      return false;
     }
   }
 
   // Guard: verify ALL zone markers appear in correct order
   // Required order: SS-IMPORTS-START → SS-IMPORTS-END → SS-HELPERS-START → SS-HELPERS-END
   //                 → SS-USER-TESTS → /SS-USER-TESTS → SS-GENERATED-START → SS-GENERATED-END
+  // Skip this validation entirely when no zone markers are present — a header-only file
+  // has no markers yet and is a valid Case 3 migration target.
+  const hasAnyZoneMarker =
+    existing.includes('// <SS-IMPORTS-START>') ||
+    existing.includes('// <SS-HELPERS-START>') ||
+    hasUserBlock ||
+    hasStart;
+
   const posImportsStart  = existing.indexOf('// <SS-IMPORTS-START>');
   const posImportsEnd    = existing.indexOf('// <SS-IMPORTS-END>');
   const posHelpersStart  = existing.indexOf('// <SS-HELPERS-START>');
@@ -791,7 +916,7 @@ export async function writeSpecFile(
     posUserEnd       < posGenStart     &&
     posGenStart      < posGenEnd;
 
-  if (!zoneOrderValid) {
+  if (hasAnyZoneMarker && !zoneOrderValid) {
     const zoneOrderReason =
       posImportsStart  >= posImportsEnd   ? 'SS-IMPORTS-START must precede SS-IMPORTS-END' :
       posImportsEnd    >= posHelpersStart ? 'SS-IMPORTS-END must precede SS-HELPERS-START' :
@@ -802,7 +927,7 @@ export async function writeSpecFile(
       'SS-GENERATED-START must precede SS-GENERATED-END';
     log('Spec file: zone order invalid — skipping write');
     log(`Context: ${zoneOrderReason}`);
-    return;
+    return false;
   }
 
   // ── Case 2: Existing file with full 4-block structure ─────────────────────
@@ -810,7 +935,7 @@ export async function writeSpecFile(
     const validationError = validateSSStructure(existing);
     if (validationError) {
       log(`Warning: SS structure invalid — ${validationError} — skipping write`);
-      return;
+      return false;
     }
 
     // Replace system zones — SS-USER-TESTS is never touched.
@@ -819,13 +944,13 @@ export async function writeSpecFile(
     const withSystemZones = mode === 'append'
       ? existing
       : replaceSystemZones(existing, importsBlock, helpersBlock, log);
-    if (withSystemZones === null) { return; }
+    if (withSystemZones === null) { return false; }
 
     const { startIdx, endIdx } = readMarker(withSystemZones);
     if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) {
       log('Warning: readMarker returned invalid range — writing system zones only');
       await writeSpecFileToPath(specPath, withSystemZones, log);
-      return;
+      return true;
     }
 
     const newTestBody = generatedBlock
@@ -858,7 +983,7 @@ export async function writeSpecFile(
       // Only SS-GENERATED changed — surgical splice
       await writeSpecFileToPath(specPath, withSystemZones, log, { startIdx, endIdx, newBlock });
     }
-    return;
+    return true;
   }
 
   // ── Case 3: One-time migration ─────────────────────────────────────────────
@@ -882,11 +1007,145 @@ export async function writeSpecFile(
     userTests,
     generatedBlock,
     sourcePath,
-    exportedFunctions
+    marker.covered   // only functions actually covered in this generation
   );
 
   await writeSpecFileToPath(specPath, finalContent, log);
   log(`Migration complete — existing content preserved — ${markerSummary}`);
+  return true;
+}
+
+// ─── Gap batch append helpers ─────────────────────────────────────────────────
+
+// Update the source-module import line inside SS-IMPORTS to include any
+// function names from coveredFunctions that are not already imported.
+// Returns the updated specContent string, or the original if no change is needed.
+function injectCoveredFunctionsIntoImports(
+  specContent: string,
+  sourcePath: string,
+  specPath: string,
+  coveredFunctions: string[],
+  log: (msg: string) => void
+): string {
+  if (coveredFunctions.length === 0) { return specContent; }
+
+  const specDir      = path.dirname(specPath);
+  // Normalize source path: strip extension so we can compare against import specifiers
+  // which conventionally omit it (e.g. from '../converter').
+  const sourceNoExt  = path.join(
+    path.dirname(sourcePath),
+    path.basename(sourcePath, path.extname(sourcePath))
+  );
+
+  const importsStart = specContent.indexOf(SS_IMPORTS_START);
+  const importsEnd   = specContent.indexOf(SS_IMPORTS_END);
+  if (importsStart === -1 || importsEnd === -1 || importsStart >= importsEnd) {
+    log('Gap append: SS-IMPORTS zone not found — import update skipped');
+    return specContent;
+  }
+
+  // Work on just the lines between the two zone markers
+  const zoneContent  = specContent.slice(importsStart + SS_IMPORTS_START.length, importsEnd);
+  const importLines  = zoneContent.split('\n');
+
+  let patchedLineIdx = -1;
+  let patchedLine    = '';
+
+  for (let i = 0; i < importLines.length; i++) {
+    const line = importLines[i];
+    const t    = line.trim();
+    if (!t.startsWith('import ')) { continue; }
+
+    // Extract the module specifier from `from '...'`
+    const fromM = t.match(/from\s+(['"])([^'"]+)\1/);
+    if (!fromM) { continue; }
+    const rawModPath = fromM[2];
+    const quote      = fromM[1];
+
+    // Resolve the import specifier to an absolute path without extension
+    const resolvedNoExt = path.resolve(specDir, rawModPath).replace(/\.[tj]sx?$/, '');
+    if (resolvedNoExt !== sourceNoExt) { continue; }
+
+    // Matched — check for non-mergeable forms
+    if (/^import\s+type\s/.test(t)) {
+      log('Gap append: source-module import is type-only — import update skipped');
+      return specContent;
+    }
+    if (/^import\s+\*\s+as/.test(t)) {
+      log('Gap append: source-module import is namespace — import update skipped');
+      return specContent;
+    }
+    if (/^import\s+['"]/.test(t)) {
+      log('Gap append: source-module import is side-effect only — import update skipped');
+      return specContent;
+    }
+
+    // Parse existing default and named specifiers
+    let existingDefault: string | null = null;
+    let existingNamed: string[]        = [];
+
+    const defaultNamedM = t.match(/^import\s+(\w+)\s*,\s*\{([^}]*)\}\s+from/);
+    if (defaultNamedM) {
+      existingDefault = defaultNamedM[1];
+      existingNamed   = defaultNamedM[2].split(',').map(s => s.trim()).filter(Boolean);
+    } else {
+      const namedOnlyM = t.match(/^import\s+\{([^}]*)\}\s+from/);
+      if (namedOnlyM) {
+        existingNamed = namedOnlyM[1].split(',').map(s => s.trim()).filter(Boolean);
+      } else {
+        const defaultOnlyM = t.match(/^import\s+(\w+)\s+from/);
+        if (defaultOnlyM) { existingDefault = defaultOnlyM[1]; }
+      }
+    }
+
+    // Merge: add only function names not already imported
+    const existingSet = new Set(existingNamed);
+    const newNames    = coveredFunctions.filter(fn => !existingSet.has(fn));
+    if (newNames.length === 0) { return specContent; } // nothing to add
+
+    const mergedNamed = [...existingNamed, ...newNames];
+    const indent      = line.match(/^(\s*)/)?.[1] ?? '';
+
+    let newImport: string;
+    if (existingDefault) {
+      newImport = `import ${existingDefault}, { ${mergedNamed.join(', ')} } from ${quote}${rawModPath}${quote};`;
+    } else {
+      newImport = `import { ${mergedNamed.join(', ')} } from ${quote}${rawModPath}${quote};`;
+    }
+
+    patchedLineIdx = i;
+    patchedLine    = indent + newImport;
+    break;
+  }
+
+  if (patchedLineIdx === -1) {
+    log('Gap append: source-module import not found in SS-IMPORTS — import update skipped');
+    return specContent;
+  }
+
+  importLines[patchedLineIdx] = patchedLine;
+  return (
+    specContent.slice(0, importsStart + SS_IMPORTS_START.length) +
+    importLines.join('\n') +
+    specContent.slice(importsEnd)
+  );
+}
+
+// Replace the // Functions covered: header line so it matches the covered= marker list.
+// Returns the updated content, or the original if the line is absent (logs a warning).
+function updateFunctionsCoveredHeader(
+  specContent: string,
+  coveredFunctions: string[],
+  log: (msg: string) => void
+): string {
+  if (!/^\/\/ Functions covered:/m.test(specContent)) {
+    log('Gap append: // Functions covered: header line not found — header update skipped');
+    return specContent;
+  }
+  return specContent.replace(
+    /^\/\/ Functions covered:.*$/m,
+    `// Functions covered: ${coveredFunctions.join(', ')}`
+  );
 }
 
 // ─── Gap batch append ─────────────────────────────────────────────────────────
@@ -991,7 +1250,28 @@ export async function appendGapTests(
 
   const newBlock = [buildMarkerLine(updatedMarker), combined, SS_END].join('\n');
 
-  await writeSpecFileToPath(specPath, specContent, log, { startIdx, endIdx, newBlock });
+  // Apply SS-IMPORTS update and // Functions covered: header update to a working copy.
+  let workingContent = injectCoveredFunctionsIntoImports(
+    specContent, sourcePath, specPath, updatedMarker.covered, log
+  );
+  workingContent = updateFunctionsCoveredHeader(workingContent, updatedMarker.covered, log);
+
+  if (workingContent !== specContent) {
+    // Content changed — recalculate SS-GENERATED positions in the updated content
+    // and write everything in a single full-file write to keep positions consistent.
+    const { startIdx: si, endIdx: ei } = readMarker(workingContent);
+    if (si !== -1 && ei !== -1) {
+      const finalContent = workingContent.slice(0, si) + newBlock + workingContent.slice(ei);
+      await writeSpecFileToPath(specPath, finalContent, log);
+    } else {
+      // Marker positions lost after content update — fall back to SS-GENERATED-only splice
+      log('Gap append: marker positions invalid after content update — writing SS-GENERATED only');
+      await writeSpecFileToPath(specPath, specContent, log, { startIdx, endIdx, newBlock });
+    }
+  } else {
+    // No content changes — use the original targeted splice (faster)
+    await writeSpecFileToPath(specPath, specContent, log, { startIdx, endIdx, newBlock });
+  }
 
   const markerSummary =
     `covered: [${updatedMarker.covered.join(', ')}]` +
