@@ -4,9 +4,12 @@ All notable changes to the "silent-spec" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [Unreleased]
+
 ## [1.0.0] - 2026-04-05
 
 ### Added
+
 - Auto-generates TypeScript/JavaScript unit tests on file save using AI providers
 - Four-zone spec file architecture (SS-IMPORTS, SS-HELPERS, SS-USER-TESTS, SS-GENERATED) preserving user-written tests across all runs
 - Support for GitHub Models (default, free), Claude (Anthropic), OpenAI, and Ollama (local) providers
@@ -24,9 +27,8 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - Structured log output with configurable skip-path filters
 
 ### Fixed
+
 - `silentspec.enabled` setting is now wired into the save handler and respected on every save event
 - `healSpec` precheck `execSync` call now has a 12 s timeout, matching `shellTscVerifySpec`
 - Ollama auto-override now only activates when `silentspec.provider` has not been explicitly set by the user
 - GitHub token setup flow no longer auto-triggers the Set Token dialog 3 s after opening the tokens page
-
-## [Unreleased]
