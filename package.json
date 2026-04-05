@@ -152,5 +152,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/bharadwajmadduri/silent-spec"
-  }
+  },
+  "icon": "icon.png"
 }
