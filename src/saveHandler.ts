@@ -90,6 +90,9 @@ export const checkedRoots = new Set<string>();
 // Project roots where we have already shown the "environment not ready" notification.
 // Reset when the environment is fixed on a subsequent save.
 const notifiedRoots  = new Set<string>();
+// Project roots where the successful-install re-save toast has been shown this session.
+// Prevents the "Save again to apply" message from repeating on every save after install.
+const installSuccessNotifiedRoots = new Set<string>();
 
 // Packages to CHECK for (determines whether env is ready).
 const FRAMEWORK_CHECK_PACKAGES: Record<string, string[]> = {
@@ -249,7 +252,7 @@ function buildInstallCommand(pm: 'npm' | 'yarn' | 'pnpm', packages: string, proj
   return `npm install --save-dev ${packages} --prefix "${projectRoot}"`;
 }
 
-async function runPreflightCheck(ctx: SilentSpecContext, filePath: string): Promise<PreflightResult> {
+async function runPreflightCheck(ctx: SilentSpecContext, filePath: string, updateStatus?: (text: string) => void): Promise<PreflightResult> {
   const full: PreflightResult = { mode: 'full', projectRoot: null, displayCmd: null, installCmd: null, installAttempted: false };
 
   // Part 5 — unknown framework: skip check, generate best effort in full mode
@@ -324,12 +327,18 @@ async function runPreflightCheck(ctx: SilentSpecContext, filePath: string): Prom
   const installCmd  = buildInstallCommand(pm, installPkgs, projectRoot);
   const displayCmd  = FRAMEWORK_DISPLAY_CMDS[ctx.framework] ?? FRAMEWORK_DISPLAY_CMDS['jest'];
 
+  updateStatus?.('$(sync~spin) Installing types...');
   try {
     await execAsync(installCmd, { cwd: projectRoot, timeout: 30_000 });
     log(`SilentSpec: set up test environment (${ctx.framework}) in ${projectRoot}`);
     if (notifiedRoots.has(projectRoot)) { notifiedRoots.delete(projectRoot); }
     checkedRoots.add(projectRoot);
-    void vscode.window.showInformationMessage(`SilentSpec set up test environment (${ctx.framework})`);
+    updateStatus?.('$(check) Types installed');
+    setTimeout(() => updateStatus?.(''), 3000);
+    if (!installSuccessNotifiedRoots.has(projectRoot)) {
+      installSuccessNotifiedRoots.add(projectRoot);
+      void vscode.window.showInformationMessage(`SilentSpec: Installed @types/${ctx.framework}. Save again to apply.`);
+    }
     return { ...full, projectRoot, installAttempted: true };
   } catch {
     // Install failed — enter degraded mode. Do NOT cache so we retry on next save.
@@ -337,6 +346,8 @@ async function runPreflightCheck(ctx: SilentSpecContext, filePath: string): Prom
     // which coordinates with "Don't show again" dismissal state. Showing it here
     // would fire before the actionable types warning popup, causing it to be dismissed.
     log(`Pre-flight: ${missingPkgs.join(', ')} missing in ${projectRoot} — entering safe mode`);
+    updateStatus?.('$(error) Types install failed');
+    setTimeout(() => updateStatus?.(''), 3000);
     return { mode: 'safe', projectRoot, displayCmd, installCmd, typesWarning: true, installAttempted: true };
   }
 }
@@ -476,6 +487,8 @@ async function handleFileSave(
     // FIX C — early unmanaged-spec guard: skip before context extraction and preflight
     if (await isUnmanagedSpec(resolvedSpecPath)) {
       log('Spec file: not managed by SilentSpec — skipping');
+      updateStatus('$(circle-slash) Skipped: unmanaged spec');
+      setTimeout(() => updateStatus(''), 3000);
       return;
     }
 
@@ -486,7 +499,7 @@ async function handleFileSave(
     // Phase 4.5 — preflight: check test environment, enable degraded mode if needed.
     // Runs once per successfully verified project root per session.
     // Never blocks generation — failures trigger safe mode, not abort.
-    const preflightResult = await runPreflightCheck(ctx, filePath);
+    const preflightResult = await runPreflightCheck(ctx, filePath, updateStatus);
     ctx.healerMode = preflightResult.mode;
     ctx.typesWarning = preflightResult.typesWarning;
     ctx.preflightProjectRoot = preflightResult.projectRoot;
@@ -511,21 +524,29 @@ async function handleFileSave(
         if (startCount > 1) {
           log('Spec file: duplicate SS-GENERATED-START marker');
           log(`Context: ${ctx.specPath}`);
+          updateStatus('$(circle-slash) Skipped: spec corrupted');
+          setTimeout(() => updateStatus(''), 3000);
           return;
         }
         if (hasStart && !hasEnd) {
           log('Spec file: missing SS-GENERATED-END marker');
           log(`Context: ${ctx.specPath}`);
+          updateStatus('$(circle-slash) Skipped: spec corrupted');
+          setTimeout(() => updateStatus(''), 3000);
           return;
         }
         if (!hasStart && hasEnd) {
           log('Spec file: missing SS-GENERATED-END marker');
           log(`Context: ${ctx.specPath}`);
+          updateStatus('$(circle-slash) Skipped: spec corrupted');
+          setTimeout(() => updateStatus(''), 3000);
           return;
         }
         if (hasStart && hasEnd && endIdx < startIdx) {
           log('Spec file: markers out of order');
           log(`Context: ${ctx.specPath}`);
+          updateStatus('$(circle-slash) Skipped: spec corrupted');
+          setTimeout(() => updateStatus(''), 3000);
           return;
         }
       }
@@ -546,6 +567,8 @@ async function handleFileSave(
           if (!hasFullZones) {
             log('Spec file: incomplete zone structure — skipping write');
             log(`Context: ${ctx.specPath}`);
+            updateStatus('$(circle-slash) Skipped: spec corrupted');
+            setTimeout(() => updateStatus(''), 3000);
             return;
           }
 
@@ -581,6 +604,8 @@ async function handleFileSave(
               'SS-GENERATED-START must precede SS-GENERATED-END';
             log('Spec file: zone order invalid — skipping write');
             log(`Context: ${ctx.specPath} — ${zoneOrderReason}`);
+            updateStatus('$(circle-slash) Skipped: spec corrupted');
+            setTimeout(() => updateStatus(''), 3000);
             return;
           }
         }

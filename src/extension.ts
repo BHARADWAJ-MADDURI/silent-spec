@@ -467,7 +467,7 @@ export function activate(context: vscode.ExtensionContext) {
     await runGapFinder(
       (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
       async (_ctx: SilentSpecContext, filePath, log, abortSignal, exportedFunctions, exportTypes) => {
-        if (processingQueue.size >= MAX_QUEUE_DEPTH) { log(`Gap Finder: queue full (${processingQueue.size}/${MAX_QUEUE_DEPTH}) — skipping`); return; }
+        if (processingQueue.size >= MAX_QUEUE_DEPTH) { log(`Gap Finder: queue full (${processingQueue.size}/${MAX_QUEUE_DEPTH}) — skipping`); updateStatusBar('$(circle-slash) Skipped: queue full'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
         processingQueue.enqueue(async () => {
           if (abortSignal.aborted) { log('Gap Finder: aborted before execution — skipping'); return; }
           const providerName = await getActiveProviderName();
@@ -476,6 +476,7 @@ export function activate(context: vscode.ExtensionContext) {
           const provider = await getActiveProvider();
           const canProceed = await checkCostAcknowledgement(context, providerName);
           if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
+          updateStatusBar('$(sync~spin) Generating...');
           let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full');
           while (pendingToResume.length > 0) {
             const retryable = filterRetryable(pendingToResume, pendingToResume, log);
@@ -490,6 +491,14 @@ export function activate(context: vscode.ExtensionContext) {
         });
       }
     );
+  }));
+
+  // ── Configuration change listener — refresh idle status bar on provider/model change ──
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+    if (e.affectsConfiguration('silentspec.provider') || e.affectsConfiguration('silentspec.model')) {
+      lastUsedProvider = getActiveProviderName();
+      updateStatusBar();
+    }
   }));
 
   // ── Save handler — main generation pipeline ──────────────────────────────
@@ -510,6 +519,8 @@ export function activate(context: vscode.ExtensionContext) {
         // identical check as a final safety net — this one avoids a wasted API call.
         if (await isUnmanagedSpec(specPath)) {
           log('Spec file: not managed by SilentSpec — skipping');
+          updateStatusBar('$(circle-slash) Skipped: unmanaged spec');
+          { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
           return;
         }
 
@@ -521,7 +532,7 @@ export function activate(context: vscode.ExtensionContext) {
           existingCovered.length > 0 || previousPending.length > 0 ? { version: 1, covered: existingCovered, pending: previousPending } : null,
           exportedFunctions
         );
-        if (reconciled.gaps.length === 0 && reconciled.pending.length === 0) { log(`Skipped: all ${exportedFunctions.length} functions covered — no generation needed`); updateStatus(''); return; }
+        if (reconciled.gaps.length === 0 && reconciled.pending.length === 0) { log(`Skipped: all ${exportedFunctions.length} functions covered — no generation needed`); updateStatusBar('$(circle-slash) Skipped: all covered'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
 
         // Determine provider before batch sizing — GitHub Models needs a lower cap.
         const providerName = await getActiveProviderName();
@@ -544,7 +555,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
         }
         const workList     = computeWorkList(reconciled, batchSize);
-        if (workList.length === 0) { log('Skipped: work list is empty after reconcile'); updateStatus(''); return; }
+        if (workList.length === 0) { log('Skipped: work list is empty after reconcile'); updateStatusBar('$(circle-slash) Skipped: all covered'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
         ctx.workList = workList;
         log(`Batch size: ${batchSize} (file: ${ctx.fileContent.length} chars, user max: ${maxPerRun})`);
         log(`Work list: [${workList.join(', ')}] (${workList.length}/${exportedFunctions.length} functions)`);
@@ -679,9 +690,17 @@ export function activate(context: vscode.ExtensionContext) {
           // Fix 2 — healer detected missing @types via TS2582/TS2304 on test globals
           // (Improvement 1/3). Uses the same helper and dedupe Set as Fix 3.
           if (healResult.missingTypes) {
-            const root = ctx.preflightProjectRoot ?? ctx.specPath ?? filePath;
-            const fw   = healResult.framework ?? ctx.framework ?? 'jest';
-            showTypesWarningIfNeeded(root, fw, ctx.installAttempted ?? false);
+            // BUG G: preflight just installed types this run — the in-process compiler
+            // hasn't seen them yet. Skip the "types missing" warning (install succeeded)
+            // and log a refresh prompt instead. BUG H toast already notified the user.
+            const isSameRunInstall = ctx.installAttempted === true && !ctx.typesWarning;
+            if (isSameRunInstall) {
+              log('Types installed but compiler needs refresh — save again');
+            } else {
+              const root = ctx.preflightProjectRoot ?? ctx.specPath ?? filePath;
+              const fw   = healResult.framework ?? ctx.framework ?? 'jest';
+              showTypesWarningIfNeeded(root, fw, ctx.installAttempted ?? false);
+            }
           }
 
           const updatedMarker = buildUpdatedMarker(existingCovered, nowCovered, nowPending);
@@ -811,6 +830,11 @@ export function activate(context: vscode.ExtensionContext) {
               }
             } catch { generationStatus = '$(check) Done'; }
           }
+          // Override: healer detected missing @types — status must reflect env-not-ready
+          // regardless of what CHECK A/B computed (tests may still be present in safe mode).
+          // Exception (BUG G): types were just installed this run — compiler needs refresh,
+          // not a hard failure. Let CHECK A/B "Done" stand; BUG H toast covers the user.
+          if (healResult.missingTypes && !(ctx.installAttempted === true && !ctx.typesWarning)) { generationStatus = '$(error) Failed: env not ready'; }
         } finally {
           activeControllers.delete(controller);
           activeGenerations--;
