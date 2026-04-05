@@ -536,7 +536,7 @@ async function handleFileSave(
           return;
         }
         if (!hasStart && hasEnd) {
-          log('Spec file: missing SS-GENERATED-END marker');
+          log('Spec file: missing SS-GENERATED-START marker');
           log(`Context: ${ctx.specPath}`);
           updateStatus('$(circle-slash) Skipped: spec corrupted');
           setTimeout(() => updateStatus(''), 3000);
@@ -706,6 +706,12 @@ export function registerSaveHandler(
       }
 
       const filePath = document.uri.fsPath;
+
+      const ssConfig = vscode.workspace.getConfiguration('silentspec');
+      if (ssConfig.get<boolean>('enabled', true) === false) {
+        log(`Skipped: silentspec.enabled is false — ${filePath}`);
+        return;
+      }
 
       if (isPausedFn()) {
         log(`Skipped: extension paused — ${filePath}`);

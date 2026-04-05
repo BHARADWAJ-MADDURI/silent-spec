@@ -563,7 +563,7 @@ export function healSpec(
         searchDir = path.dirname(searchDir);
       }
       const tscCmd = tscBin || 'tsc';
-      execSync(`"${tscCmd}" --noEmit --project "${tsconfigPath}"`, { stdio: 'pipe' });
+      execSync(`"${tscCmd}" --noEmit --project "${tsconfigPath}"`, { stdio: 'pipe', timeout: 12_000 });
       emit('Healer: tsc clean — skipping diagnostic analysis');
       return {
         healed: specContent, removedTests: [], removedTestReasons: {},

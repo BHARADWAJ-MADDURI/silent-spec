@@ -116,6 +116,13 @@ export class OllamaProvider implements AIProvider {
       if (!response.ok) {
         const text = await response.text();
         log(`Ollama error ${response.status}: ${text}`);
+        // D2 fix: if Ollama says the model doesn't exist, clear the cached model so
+        // the next request re-detects a currently-available model. Only clears the
+        // auto-resolved model, not a user-configured override.
+        if (!this.modelOverride && (response.status === 404 || /not found/i.test(text))) {
+          log('Ollama: cached model is stale — will re-detect on next request');
+          this.resolvedModel = null;
+        }
         return null;
       }
 

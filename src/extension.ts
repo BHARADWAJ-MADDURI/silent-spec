@@ -10,6 +10,7 @@ import { GitHubModelsProvider } from './ai/githubModelsProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
 import { writeSpecFile, appendGapTests, resolveSpecPath, updateMarker, isUnmanagedSpec } from './fileWriter';
+import { withSpecPathLock } from './utils/specPathLock';
 import { runGapFinder } from './gapFinder';
 import { buildPrompt } from './promptBuilder';
 import { extractContext, SilentSpecContext } from './contextExtractor';
@@ -133,14 +134,25 @@ async function checkCostAcknowledgement(context: vscode.ExtensionContext, provid
   const acknowledged = context.globalState.get<boolean>(key, false);
   if (acknowledged) { return true; }
   costCheckInProgress = true;
-  const action = await vscode.window.showWarningMessage(
-    `SilentSpec will use your ${providerName === 'claude' ? 'Claude (Anthropic)' : 'OpenAI'} API key. Typical cost is ~$0.003 per generation.`,
-    'I understand — continue', 'Cancel'
-  );
-  costCheckInProgress = false;
-  if (action !== 'I understand — continue') { return false; }
-  await context.globalState.update(key, true);
-  return true;
+  // B4 fix: costCheckInProgress ALWAYS cleared via finally, even if modal is ignored or
+  // globalState.update throws. 30 s timeout so a dismissed/ignored notification never
+  // blocks the queue for the session — long enough for a user to read and respond.
+  try {
+    const COST_MODAL_TIMEOUT_MS = 30_000;
+    const modalPromise = vscode.window.showWarningMessage(
+      `SilentSpec will use your ${providerName === 'claude' ? 'Claude (Anthropic)' : 'OpenAI'} API key. Typical cost is ~$0.003 per generation.`,
+      'I understand — continue', 'Cancel'
+    );
+    const timeoutPromise = new Promise<undefined>(resolve =>
+      setTimeout(() => resolve(undefined), COST_MODAL_TIMEOUT_MS)
+    );
+    const action = await Promise.race([modalPromise, timeoutPromise]);
+    if (action !== 'I understand — continue') { return false; }
+    await context.globalState.update(key, true);
+    return true;
+  } finally {
+    costCheckInProgress = false;
+  }
 }
 
 function getProvider(context: vscode.ExtensionContext, providerOverride?: string): AIProvider {
@@ -253,6 +265,12 @@ async function runOneGapBatch(
     const { nowCovered, nowPending } = verifyGenerated(fixedValidated, workList);
     log(`Gap batch verified — covered: [${nowCovered.join(', ')}] pending: [${nowPending.join(', ')}]`);
     if (nowCovered.length === 0 && workList.length > 0) { telemetry.recordFailure(providerName, 'no_describe_found'); }
+    // D1: warn when GitHub Models appears to have truncated output mid-work-list.
+    // Only fires when some functions were covered (not a total failure) but fewer than
+    // requested — the most common truncation pattern on the free-tier output token cap.
+    if (providerName === 'github' && nowCovered.length > 0 && nowCovered.length < workList.length) {
+      log(`Warning: GitHub Models may have truncated output — covered ${nowCovered.length}/${workList.length} requested functions. Consider reducing maxFunctionsPerRun or switching to a paid provider.`);
+    }
     nowCovered.forEach(fn => resetRetry(fn));
     const healResult = healSpec(fixedValidated, path.basename(specPath), filePath, log, ctx.healerMode, ctx.framework);
     const finalContent = healResult.wasHealed ? healResult.healed : fixedValidated;
@@ -294,6 +312,9 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   const telemetry = new TelemetryService(context, installDate);
+  // H1 fix: route unexpected queue-task exceptions to the SilentSpec output channel
+  // so users can see them. Falls back to console.error until this wiring runs.
+  processingQueue.setErrorLogger(msg => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`));
   void isOllamaRunning().then(running => { cachedOllamaRunning = running; });
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = 'silentspec.togglePause';
@@ -347,15 +368,19 @@ export function activate(context: vscode.ExtensionContext) {
 
   function getActiveProvider(): AIProvider {
     const config = vscode.workspace.getConfiguration('silentspec');
+    const providerInspect = config.inspect<string>('provider');
+    const isExplicitlySet = (providerInspect?.workspaceFolderValue ?? providerInspect?.workspaceValue ?? providerInspect?.globalValue) !== undefined;
     const configuredProvider = config.get<string>('provider', 'github');
-    if (configuredProvider === 'github' && cachedOllamaRunning === true) { return getProvider(context, 'ollama'); }
+    if (!isExplicitlySet && cachedOllamaRunning === true) { return getProvider(context, 'ollama'); }
     return getProvider(context);
   }
 
   function getActiveProviderName(): string {
     const config = vscode.workspace.getConfiguration('silentspec');
+    const providerInspect = config.inspect<string>('provider');
+    const isExplicitlySet = (providerInspect?.workspaceFolderValue ?? providerInspect?.workspaceValue ?? providerInspect?.globalValue) !== undefined;
     const configuredProvider = config.get<string>('provider', 'github');
-    if (configuredProvider === 'github' && cachedOllamaRunning === true) { return 'ollama'; }
+    if (!isExplicitlySet && cachedOllamaRunning === true) { return 'ollama'; }
     return configuredProvider;
   }
 
@@ -467,7 +492,12 @@ export function activate(context: vscode.ExtensionContext) {
     await runGapFinder(
       (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
       async (_ctx: SilentSpecContext, filePath, log, abortSignal, exportedFunctions, exportTypes) => {
-        if (processingQueue.size >= MAX_QUEUE_DEPTH) { log(`Gap Finder: queue full (${processingQueue.size}/${MAX_QUEUE_DEPTH}) — skipping`); updateStatusBar('$(circle-slash) Skipped: queue full'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
+        if (processingQueue.size >= MAX_QUEUE_DEPTH) {
+          log(`Gap Finder: queue full (${processingQueue.size}/${MAX_QUEUE_DEPTH}) — skipping`);
+          try { updateStatusBar('$(circle-slash) Skipped: queue full'); } catch { /* status bar may be disposed */ }
+          { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
+          return;
+        }
         processingQueue.enqueue(async () => {
           if (abortSignal.aborted) { log('Gap Finder: aborted before execution — skipping'); return; }
           const providerName = await getActiveProviderName();
@@ -475,18 +505,25 @@ export function activate(context: vscode.ExtensionContext) {
           updateStatusBar();
           const provider = await getActiveProvider();
           const canProceed = await checkCostAcknowledgement(context, providerName);
-          if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
-          updateStatusBar('$(sync~spin) Generating...');
-          let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full');
-          while (pendingToResume.length > 0) {
-            const retryable = filterRetryable(pendingToResume, pendingToResume, log);
-            if (retryable.length === 0) { log('Gap Finder: all pending functions hit retry cap — stopping'); break; }
-            log(`Gap Finder: ${retryable.length} function(s) pending — continuing loop...`);
-            updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
-            pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar, 'full');
+          if (!canProceed) {
+            try { updateStatusBar('$(circle-slash) Skipped: cancelled'); } catch { /* status bar may be disposed */ }
+            { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
+            return;
           }
+          updateStatusBar('$(sync~spin) Generating...');
+          const specPath = await resolveSpecPath(filePath);
+          await withSpecPathLock(specPath, async () => {
+            let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full');
+            while (pendingToResume.length > 0) {
+              const retryable = filterRetryable(pendingToResume, pendingToResume, log);
+              if (retryable.length === 0) { log('Gap Finder: all pending functions hit retry cap — stopping'); break; }
+              log(`Gap Finder: ${retryable.length} function(s) pending — continuing loop...`);
+              updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
+              pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar, 'full');
+            }
+          });
           log('Gap Finder: done');
-          updateStatusBar('$(check) Done');
+          try { updateStatusBar('$(check) Done'); } catch { /* status bar may be disposed */ }
           { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
         });
       }
@@ -513,13 +550,15 @@ export function activate(context: vscode.ExtensionContext) {
       try {
         const specPath = ctx.specPath ?? await resolveSpecPath(filePath);
 
+        await withSpecPathLock(specPath, async () => {
+
         // ── Early unmanaged-spec guard ────────────────────────────────────────
         // Skip before any generation work if the resolved spec file already
         // exists and is not managed by SilentSpec. writeSpecFile() keeps its own
         // identical check as a final safety net — this one avoids a wasted API call.
         if (await isUnmanagedSpec(specPath)) {
           log('Spec file: not managed by SilentSpec — skipping');
-          updateStatusBar('$(circle-slash) Skipped: unmanaged spec');
+          try { updateStatusBar('$(circle-slash) Skipped: unmanaged spec'); } catch { /* status bar may be disposed */ }
           { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
           return;
         }
@@ -532,7 +571,12 @@ export function activate(context: vscode.ExtensionContext) {
           existingCovered.length > 0 || previousPending.length > 0 ? { version: 1, covered: existingCovered, pending: previousPending } : null,
           exportedFunctions
         );
-        if (reconciled.gaps.length === 0 && reconciled.pending.length === 0) { log(`Skipped: all ${exportedFunctions.length} functions covered — no generation needed`); updateStatusBar('$(circle-slash) Skipped: all covered'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
+        if (reconciled.gaps.length === 0 && reconciled.pending.length === 0) {
+          log(`Skipped: all ${exportedFunctions.length} functions covered — no generation needed`);
+          try { updateStatusBar('$(circle-slash) Skipped: all covered'); } catch { /* status bar may be disposed */ }
+          { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
+          return;
+        }
 
         // Determine provider before batch sizing — GitHub Models needs a lower cap.
         const providerName = await getActiveProviderName();
@@ -555,13 +599,22 @@ export function activate(context: vscode.ExtensionContext) {
           }
         }
         const workList     = computeWorkList(reconciled, batchSize);
-        if (workList.length === 0) { log('Skipped: work list is empty after reconcile'); updateStatusBar('$(circle-slash) Skipped: all covered'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
+        if (workList.length === 0) {
+          log('Skipped: work list is empty after reconcile');
+          try { updateStatusBar('$(circle-slash) Skipped: all covered'); } catch { /* status bar may be disposed */ }
+          { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
+          return;
+        }
         ctx.workList = workList;
         log(`Batch size: ${batchSize} (file: ${ctx.fileContent.length} chars, user max: ${maxPerRun})`);
         log(`Work list: [${workList.join(', ')}] (${workList.length}/${exportedFunctions.length} functions)`);
         const provider = await getActiveProvider();
         const canProceed = await checkCostAcknowledgement(context, providerName);
-        if (!canProceed) { updateStatusBar('$(circle-slash) Skipped: cancelled'); { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); } return; }
+        if (!canProceed) {
+          try { updateStatusBar('$(circle-slash) Skipped: cancelled'); } catch { /* status bar may be disposed */ }
+          { const _t = setTimeout(() => { activeTimers.delete(_t); updateStatusBar(); }, 3000); activeTimers.add(_t); }
+          return;
+        }
 
         const prompt = buildPrompt(ctx);
 
@@ -681,6 +734,12 @@ export function activate(context: vscode.ExtensionContext) {
           const { nowCovered, nowPending } = verifyGenerated(fixedValidated, workList);
           log(`Generation verified — covered: [${nowCovered.join(', ')}] pending: [${nowPending.join(', ')}]`);
           if (nowCovered.length === 0 && workList.length > 0) { telemetry.recordFailure(providerName, 'no_describe_found'); }
+          // D1: warn when GitHub Models appears to have truncated output mid-work-list.
+          // Only fires when some functions were covered (not a total failure) but fewer than
+          // requested — the most common truncation pattern on the free-tier output token cap.
+          if (providerName === 'github' && nowCovered.length > 0 && nowCovered.length < workList.length) {
+            log(`Warning: GitHub Models may have truncated output — covered ${nowCovered.length}/${workList.length} requested functions. Consider reducing maxFunctionsPerRun or switching to a paid provider.`);
+          }
           nowCovered.forEach(fn => resetRetry(fn));
 
           const healResult = healSpec(fixedValidated, path.basename(specPath), filePath, log, ctx.healerMode ?? 'full', ctx.framework);
@@ -779,45 +838,82 @@ export function activate(context: vscode.ExtensionContext) {
                         log('Auto-gap-fill: all remaining functions hit retry cap — stopping');
                         gapFillScheduled = false;
                         if (activeGenerations === 0) {
-                          updateStatusBar('$(check) Done');
+                          try { updateStatusBar('$(check) Done'); } catch { /* status bar may be disposed */ }
                           { const _t2 = setTimeout(() => { activeTimers.delete(_t2); updateStatusBar(); }, 3000); activeTimers.add(_t2); }
                         }
                         return;
                       }
+                      // B1 fix: guard against scheduling on an already-aborted signal.
+                      if (abortSignal.aborted) {
+                        log('Auto-gap-fill: aborted — not scheduling next batch');
+                        gapFillScheduled = false;
+                        return;
+                      }
                       log(`Auto-scheduling next batch for [${retryable.join(', ')}]...`);
-                      { const _t = setTimeout(() => { activeTimers.delete(_t);
+
+                      // ── B1 fix: abort-aware timer with idempotent cleanup ─────────────
+                      let cleanedUp = false;
+                      const _t = setTimeout(() => {
+                        cleanupTimer();  // removes abort listener and activeTimers entry
                         processingQueue.enqueue(async () => {
-                          log(`Auto-gap-fill: generating batch for [${retryable.join(', ')}]`);
-                          updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
-                          await runOneGapBatch(filePath, exportedFunctions, exportTypes, retryable, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
-                          log('[SilentSpec] Auto-gap-fill complete');
-                          // Re-read coverage from the live marker to decide whether to continue
+                          let willRecurse = false;
                           try {
-                            const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
-                            const { marker: latestMarker } = readMarker(Buffer.from(bytes).toString('utf8'));
-                            const stillMissing = latestMarker
-                              ? exportedFunctions.filter(f => !latestMarker.covered.includes(f))
-                              : [];
-                            if (stillMissing.length === 0) {
-                              log('Auto-gap-fill: all functions covered');
+                            // Guard: abort may have fired between timer creation and queue execution.
+                            if (abortSignal.aborted) { log('Auto-gap-fill: aborted before batch execution — skipping'); return; }
+                            log(`Auto-gap-fill: generating batch for [${retryable.join(', ')}]`);
+                            updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
+                            await withSpecPathLock(specPath, async () => {
+                              await runOneGapBatch(filePath, exportedFunctions, exportTypes, retryable, provider, providerName, context, telemetry, log, updateStatusBar, ctx.healerMode);
+                            });
+                            log('[SilentSpec] Auto-gap-fill complete');
+                            // Re-read coverage from the live marker to decide whether to continue.
+                            try {
+                              const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+                              const { marker: latestMarker } = readMarker(Buffer.from(bytes).toString('utf8'));
+                              const stillMissing = latestMarker
+                                ? exportedFunctions.filter(f => !latestMarker.covered.includes(f))
+                                : [];
+                              if (stillMissing.length === 0) {
+                                log('Auto-gap-fill: all functions covered');
+                              } else {
+                                log(`Auto-gap-fill: ${stillMissing.length} function(s) still uncovered — scheduling next batch`);
+                                willRecurse = true;
+                                scheduleGapBatch(stillMissing, retryable);
+                              }
+                            } catch {
+                              // Marker read failed — fall through to finally, which clears gapFillScheduled.
+                            }
+                          } finally {
+                            // B3 fix: clear gapFillScheduled exactly once — only when the chain ends.
+                            // If willRecurse is true, scheduleGapBatch owns the flag going forward.
+                            if (!willRecurse) {
                               gapFillScheduled = false;
                               if (activeGenerations === 0) {
-                                updateStatusBar('$(check) Done');
+                                try { updateStatusBar('$(check) Done'); } catch { /* status bar may be disposed */ }
                                 { const _t2 = setTimeout(() => { activeTimers.delete(_t2); updateStatusBar(); }, 3000); activeTimers.add(_t2); }
                               }
-                            } else {
-                              log(`Auto-gap-fill: ${stillMissing.length} function(s) still uncovered — scheduling next batch`);
-                              scheduleGapBatch(stillMissing, retryable);
-                            }
-                          } catch {
-                            gapFillScheduled = false;
-                            if (activeGenerations === 0) {
-                              updateStatusBar('$(check) Done');
-                              { const _t2 = setTimeout(() => { activeTimers.delete(_t2); updateStatusBar(); }, 3000); activeTimers.add(_t2); }
                             }
                           }
                         });
-                      }, 2000); activeTimers.add(_t); }
+                      }, 2000);
+                      activeTimers.add(_t);
+
+                      // Idempotent cleanup: safe to call from abort handler or timer callback.
+                      function cleanupTimer(): void {
+                        if (cleanedUp) { return; }
+                        cleanedUp = true;
+                        clearTimeout(_t);
+                        activeTimers.delete(_t);
+                        abortSignal.removeEventListener('abort', onAbort);
+                      }
+
+                      // Abort handler: cancel the pending timer and end the gap-fill chain.
+                      function onAbort(): void {
+                        cleanupTimer();
+                        gapFillScheduled = false;
+                      }
+
+                      abortSignal.addEventListener('abort', onAbort);
                     };
 
                     scheduleGapBatch(notYetAttempted, []); // [] = first attempt, count starts at 1
@@ -841,7 +937,8 @@ export function activate(context: vscode.ExtensionContext) {
           // Only update the status bar when all concurrent generations are done.
           // If other files are still generating, leave the "Generating..." indicator.
           if (activeGenerations === 0) {
-            updateStatusBar(generationStatus);
+            // F2 fix: wrap so a thrown status update never prevents idle-reset registration.
+            try { updateStatusBar(generationStatus); } catch { /* status bar may be disposed */ }
             // Skip the idle-reset timeout when a gap fill batch is scheduled —
             // it will set its own generating status when it starts.
             if (!gapFillScheduled) {
@@ -849,6 +946,8 @@ export function activate(context: vscode.ExtensionContext) {
             }
           }
         }
+
+        }); // withSpecPathLock
       } finally { processingLock.delete(filePath); }
     });
   }, (fp: string): string | null => {

@@ -3,7 +3,8 @@
   "publisher": "bharadwajmadduri",
   "displayName": "SilentSpec",
   "description": "Auto-generates unit tests on file save using AI — silent, surgical, zero friction",
-  "version": "0.0.1",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.109.0"
   },
@@ -12,7 +13,11 @@
     "Machine Learning"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -89,7 +94,7 @@
           "type": "string",
           "default": "",
           "description": "Model override. Leave empty for provider default.",
-          "markdownDescription": "Leave empty to use defaults: `deepseek-coder:6.7b` (Ollama) / `claude-sonnet-4-20250514` (Claude) / `gpt-4o` (OpenAI) / `gpt-4o` (GitHub Models)"
+          "markdownDescription": "Leave empty to use defaults: `deepseek-coder:6.7b` (Ollama) / `claude-sonnet-4-6` (Claude) / `gpt-4o` (OpenAI) / `gpt-4o` (GitHub Models)"
         },
         "silentspec.openSpecOnCreate": {
           "type": "boolean",

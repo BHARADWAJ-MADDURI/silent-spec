@@ -11,6 +11,11 @@ import {
   updateMarkerOnly,
 } from './utils/markerManager';
 import { isUnmanagedContent } from './utils/unmanagedSpec';
+import {
+  stripEchoedLinesFromBlock,
+  stripEchoedUserTestsSection,
+  validateAssembledMarkerCounts,
+} from './utils/stripEchoedContent';
 
 // ─── 4-Block Zone Structure ───────────────────────────────────────────────────
 //
@@ -801,7 +806,16 @@ export async function writeSpecFile(
   mode: 'replace' | 'append' = 'replace'
 ): Promise<boolean> {
   const specPath = await resolveSpecPath(sourcePath, log);
-  const { importsBlock, helpersBlock, testsBlock: generatedBlock } = splitAIOutput(aiOutput, marker);
+  const { importsBlock: rawImportsBlock, helpersBlock: rawHelpersBlock, testsBlock: rawGeneratedBlock } = splitAIOutput(aiOutput, marker);
+  // Layer 1: remove echoed zone-marker lines and header lines from the import/helper buckets.
+  // If the LLM echoes the full file zone structure, those marker lines land here and would
+  // produce duplicate markers when replaceSystemZones inserts the block between zone tags.
+  const importsBlock   = stripEchoedLinesFromBlock(rawImportsBlock);
+  const helpersBlock   = stripEchoedLinesFromBlock(rawHelpersBlock);
+  // Layer 2: remove any echoed SS-USER-TESTS block from the tests bucket.
+  // If the LLM copies user test content into its output it lands in generatedBlock and
+  // would produce duplicate describe blocks in SS-GENERATED.
+  const generatedBlock = stripEchoedUserTestsSection(rawGeneratedBlock);
 
   const markerSummary =
     `covered: [${marker.covered.join(', ')}]` +
@@ -815,6 +829,12 @@ export async function writeSpecFile(
       importsBlock, helpersBlock, SS_USER_PLACEHOLDER, generatedBlock,
       sourcePath, marker.covered   // only functions actually covered in this generation
     );
+    // Layer 3: validate assembled marker counts before creating the file.
+    const newFileMarkerError = validateAssembledMarkerCounts(content);
+    if (newFileMarkerError) {
+      log(`Warning: assembled spec marker error (${newFileMarkerError}) — aborting write`);
+      return false;
+    }
     edit.createFile(specUri, { overwrite: false, ignoreIfExists: false });
     if (!await vscode.workspace.applyEdit(edit)) {
       throw new Error(`applyEdit failed to create spec file: ${specPath}`);
@@ -868,7 +888,7 @@ export async function writeSpecFile(
       return false;
     }
     if (!hasStart && hasEnd) {
-      log('Spec file: missing SS-GENERATED-END marker');
+      log('Spec file: missing SS-GENERATED-START marker');
       return false;
     }
     if (hasStart && hasEnd && endIdx < startIdx) {
@@ -978,9 +998,22 @@ export async function writeSpecFile(
         withSystemZones.slice(0, startIdx) +
         newBlock +
         withSystemZones.slice(endIdx);
+      // Layer 3: validate assembled marker counts before write.
+      const fullWriteMarkerError = validateAssembledMarkerCounts(finalContent);
+      if (fullWriteMarkerError) {
+        log(`Warning: assembled spec marker error (${fullWriteMarkerError}) — aborting write`);
+        return false;
+      }
       await writeSpecFileToPath(specPath, finalContent, log);
     } else {
-      // Only SS-GENERATED changed — surgical splice
+      // Only SS-GENERATED changed — surgical splice.
+      // Assemble the full content for validation only; write uses the targeted splice.
+      const spliceAssembled = withSystemZones.slice(0, startIdx) + newBlock + withSystemZones.slice(endIdx);
+      const spliceMarkerError = validateAssembledMarkerCounts(spliceAssembled);
+      if (spliceMarkerError) {
+        log(`Warning: assembled spec marker error (${spliceMarkerError}) — aborting write`);
+        return false;
+      }
       await writeSpecFileToPath(specPath, withSystemZones, log, { startIdx, endIdx, newBlock });
     }
     return true;
@@ -1010,6 +1043,12 @@ export async function writeSpecFile(
     marker.covered   // only functions actually covered in this generation
   );
 
+  // Layer 3: validate assembled marker counts before write.
+  const migrationMarkerError = validateAssembledMarkerCounts(finalContent);
+  if (migrationMarkerError) {
+    log(`Warning: assembled spec marker error (${migrationMarkerError}) — aborting write`);
+    return false;
+  }
   await writeSpecFileToPath(specPath, finalContent, log);
   log(`Migration complete — existing content preserved — ${markerSummary}`);
   return true;

@@ -53,9 +53,6 @@ export class GitHubModelsProvider implements AIProvider {
           void vscode.env.openExternal(
             vscode.Uri.parse('https://github.com/settings/tokens')
           );
-          setTimeout(() => {
-            void vscode.commands.executeCommand('silentspec.setApiKey');
-          }, 3000);
         }
       });
       return null;
