@@ -770,6 +770,10 @@ export function activate(context: vscode.ExtensionContext) {
           log(`Write mode: ${writeMode} (${workList.length}/${exportedFunctions.length} functions)`);
           const specWritten = await writeSpecFile(filePath, finalContent, log, updatedMarker, exportedFunctions, writeMode);
           if (!specWritten) { return; }
+          // Open spec in split panel on first creation (controlled by silentspec.openSpecOnCreate)
+          if (existingCovered.length === 0 && vscode.workspace.getConfiguration('silentspec').get<boolean>('openSpecOnCreate', true)) {
+            void vscode.window.showTextDocument(vscode.Uri.file(specPath), { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true });
+          }
           telemetry.recordSuccess(providerName, nowCovered, nowPending);
           failureNotifiedFiles.delete(filePath); // clear so next failure re-notifies
           const specCompileReady = !healResult.missingTypes && !healResult.hasGlobalErrors;

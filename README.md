@@ -1,6 +1,8 @@
 <div align="center">
 
-<!-- TODO: logo — e.g. a small waveform or silent-symbol icon -->
+<p align="center">
+  <img src="icon.png" alt="SilentSpec" width="128" />
+</p>
 
 # SilentSpec
 
@@ -19,7 +21,8 @@ SilentSpec only generates what's missing. It tracks which exported functions alr
 > ✔ Add a function → only that function gets tested
 > ✔ Your hand-written tests are never touched
 
-<!-- TODO: demo GIF — showing save → status bar "Generating…" → spec file appearing in split panel -->
+![SilentSpec Demo](demo.gif)
+
 <!-- alt text: "Save a TypeScript file, watch SilentSpec create a spec beside it with tests for every exported function" -->
 
 ## SilentSpec runs on save: analyzes your exports, generates only missing tests, fixes compile errors, and writes everything into a protected spec file.

@@ -962,7 +962,7 @@ export async function writeSpecFile(
     // In append mode, only SS-GENERATED is updated — SS-IMPORTS and SS-HELPERS are preserved.
     // null return means duplicate markers detected — abort entire write.
     const withSystemZones = mode === 'append'
-      ? existing
+      ? injectCoveredFunctionsIntoImports(existing, sourcePath, specPath, marker.covered, log)
       : replaceSystemZones(existing, importsBlock, helpersBlock, log);
     if (withSystemZones === null) { return false; }
 
