@@ -16,3 +16,4 @@ vsc-extension-quickstart.md
 .gitignore
 **/*.test.ts
 **/__tests__/
+**/*.map
