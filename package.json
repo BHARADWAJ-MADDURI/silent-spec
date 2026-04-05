@@ -148,5 +148,9 @@
   },
   "dependencies": {
     "@typescript-eslint/typescript-estree": "^8.56.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bharadwajmadduri/silent-spec"
   }
 }
