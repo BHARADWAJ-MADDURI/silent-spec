@@ -311,6 +311,31 @@ export function activate(context: vscode.ExtensionContext) {
     })();
   }
 
+  // One-time data disclosure — fires once ever, non-blocking, flag stored immediately
+  // so a VS Code restart before clicking never causes it to appear again.
+  // Placed before save listeners and AI calls are registered.
+  const disclosureKey = 'silentspec.dataDisclosureShown';
+  if (!context.globalState.get<boolean>(disclosureKey, false)) {
+    void context.globalState.update(disclosureKey, true);
+    const providerLabels: Record<string, string> = {
+      github: 'GitHub Models',
+      claude: 'Claude (Anthropic)',
+      openai: 'OpenAI',
+      ollama: 'Ollama (local)',
+    };
+    const configuredProvider = vscode.workspace.getConfiguration('silentspec').get<string>('provider', 'github');
+    const providerLabel = providerLabels[configuredProvider] ?? 'your configured AI provider';
+    void vscode.window.showInformationMessage(
+      `SilentSpec sends source code from saved files to ${providerLabel} to generate tests. See the README for full privacy details.`,
+      'Got it',
+      'Learn more'
+    ).then(action => {
+      if (action === 'Learn more') {
+        void vscode.env.openExternal(vscode.Uri.parse('https://github.com/bharadwajmadduri/silent-spec#privacy-data--security'));
+      }
+    });
+  }
+
   const telemetry = new TelemetryService(context, installDate);
   // H1 fix: route unexpected queue-task exceptions to the SilentSpec output channel
   // so users can see them. Falls back to console.error until this wiring runs.

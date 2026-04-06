@@ -20,6 +20,12 @@
     "onLanguage:javascriptreact"
   ],
   "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Automatic test generation and TypeScript compilation checks require a trusted workspace. In untrusted workspaces, generation is disabled."
+    }
+  },
   "contributes": {
     "commands": [
       {

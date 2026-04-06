@@ -201,7 +201,7 @@ function buildFileSection(ctx: SilentSpecContext): string {
   }
 
   const importNote = specPath
-    ? `The spec file will be written to: ${specPath}\nAll imports must use paths relative to that location.`
+    ? `The spec file name is: ${path.basename(specPath)}\nAll imports must use paths relative to its location.`
     : '';
 
   return [

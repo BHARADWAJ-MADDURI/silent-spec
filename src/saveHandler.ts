@@ -93,6 +93,9 @@ const notifiedRoots  = new Set<string>();
 // Project roots where the successful-install re-save toast has been shown this session.
 // Prevents the "Save again to apply" message from repeating on every save after install.
 const installSuccessNotifiedRoots = new Set<string>();
+// Tracks whether the untrusted-workspace warning has been shown this session.
+// Resets to false on the next VS Code window open (module reload).
+let untrustedWarningShown = false;
 
 // Packages to CHECK for (determines whether env is ready).
 const FRAMEWORK_CHECK_PACKAGES: Record<string, string[]> = {
@@ -245,11 +248,14 @@ async function detectPackageManager(projectRoot: string): Promise<'npm' | 'yarn'
   return 'npm';
 }
 
-// packages is a space-separated list (e.g. "jest @types/jest ts-jest")
-function buildInstallCommand(pm: 'npm' | 'yarn' | 'pnpm', packages: string, projectRoot: string): string {
-  if (pm === 'yarn') { return `yarn add --dev ${packages} --cwd "${projectRoot}"`; }
-  if (pm === 'pnpm') { return `pnpm add --save-dev ${packages} --dir "${projectRoot}"`; }
-  return `npm install --save-dev ${packages} --prefix "${projectRoot}"`;
+// packages is a space-separated list (e.g. "jest @types/jest ts-jest").
+// projectRoot is passed via execAsync's cwd option — no need to interpolate it
+// into the shell string, which would expose it to shell injection if the path
+// contains special characters (", `, $(), etc.).
+function buildInstallCommand(pm: 'npm' | 'yarn' | 'pnpm', packages: string): string {
+  if (pm === 'yarn') { return `yarn add --dev ${packages}`; }
+  if (pm === 'pnpm') { return `pnpm add --save-dev ${packages}`; }
+  return `npm install --save-dev ${packages}`;
 }
 
 async function runPreflightCheck(ctx: SilentSpecContext, filePath: string, updateStatus?: (text: string) => void): Promise<PreflightResult> {
@@ -324,7 +330,7 @@ async function runPreflightCheck(ctx: SilentSpecContext, filePath: string, updat
   log(`Pre-flight: ${missingPkgs.join(', ')} missing in ${projectRoot} — attempting install`);
   const pm          = await detectPackageManager(projectRoot);
   const installPkgs = FRAMEWORK_INSTALL_PACKAGES[ctx.framework];
-  const installCmd  = buildInstallCommand(pm, installPkgs, projectRoot);
+  const installCmd  = buildInstallCommand(pm, installPkgs);
   const displayCmd  = FRAMEWORK_DISPLAY_CMDS[ctx.framework] ?? FRAMEWORK_DISPLAY_CMDS['jest'];
 
   updateStatus?.('$(sync~spin) Installing types...');
@@ -426,6 +432,23 @@ async function handleFileSave(
   isAutoGapFill: boolean = false,
   earlyGuard?: (filePath: string) => string | null
 ): Promise<void> {
+  // Workspace trust guard — shell commands (tsc, npm install) require a trusted workspace.
+  // See package.json capabilities.untrustedWorkspaces for the manifest declaration.
+  if (!vscode.workspace.isTrusted) {
+    if (!untrustedWarningShown) {
+      untrustedWarningShown = true;
+      void vscode.window.showWarningMessage(
+        'SilentSpec: this workspace is not trusted — generation is disabled.',
+        'Trust Workspace'
+      ).then(action => {
+        if (action === 'Trust Workspace') {
+          void vscode.commands.executeCommand('workbench.action.manageTrust');
+        }
+      });
+    }
+    return;
+  }
+
   try {
     // Phase 1 — read file content asynchronously
     const content = await readFileContent(filePath);

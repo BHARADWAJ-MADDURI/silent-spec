@@ -1,7 +1,7 @@
 import * as ts from 'typescript';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 
 export interface HealResult {
   healed: string;
@@ -427,24 +427,25 @@ function shellTscVerifySpec(
   const specBasename     = path.basename(specFilePath);
 
   let rawOutput = '';
-  try {
-    execSync(`"${tscCmd}" --noEmit --project "${tsconfigPath}"`, {
-      stdio: 'pipe',
-      timeout: 10000,
-    });
+  const tscResult = spawnSync(tscCmd, ['--noEmit', '--project', tsconfigPath], {
+    stdio: 'pipe',
+    timeout: 10000,
+  });
+  // Process killed (timeout) or failed to start (executable not found)
+  if (tscResult.signal !== null || tscResult.error !== undefined) {
+    if (tscResult.signal !== null) {
+      emit('Verify (shell): tsc timed out (>10s) — shell fallback inconclusive');
+    }
+    return { clean: true, inconclusive: true };
+  }
+  if (tscResult.status === 0) {
     // tsc exited 0 — whole project is clean, spec is fine
     return { clean: true, inconclusive: false };
-  } catch (err: unknown) {
-    const e = err as { killed?: boolean; stdout?: Buffer; stderr?: Buffer };
-    if (e.killed) {
-      emit('Verify (shell): tsc timed out (>10s) — shell fallback inconclusive');
-      return { clean: true, inconclusive: true };
-    }
-    rawOutput = [
-      e.stdout ? e.stdout.toString() : '',
-      e.stderr ? e.stderr.toString() : '',
-    ].join('\n');
   }
+  rawOutput = [
+    tscResult.stdout ? tscResult.stdout.toString() : '',
+    tscResult.stderr ? tscResult.stderr.toString() : '',
+  ].join('\n');
 
   // Scope to lines that reference our spec file.
   const specErrorLines = rawOutput
@@ -554,28 +555,27 @@ export function healSpec(
     'tsconfig.json'
   );
   if (tsconfigPath) {
-    try {
-      let tscBin = '';
-      let searchDir = path.dirname(tsconfigPath);
-      while (searchDir !== path.dirname(searchDir)) {
-        const candidate = path.join(searchDir, 'node_modules', '.bin', 'tsc');
-        if (fs.existsSync(candidate)) { tscBin = candidate; break; }
-        searchDir = path.dirname(searchDir);
-      }
-      const tscCmd = tscBin || 'tsc';
-      execSync(`"${tscCmd}" --noEmit --project "${tsconfigPath}"`, { stdio: 'pipe', timeout: 12_000 });
+    let tscBin = '';
+    let searchDir = path.dirname(tsconfigPath);
+    while (searchDir !== path.dirname(searchDir)) {
+      const candidate = path.join(searchDir, 'node_modules', '.bin', 'tsc');
+      if (fs.existsSync(candidate)) { tscBin = candidate; break; }
+      searchDir = path.dirname(searchDir);
+    }
+    const tscCmd = tscBin || 'tsc';
+    const healTscResult = spawnSync(tscCmd, ['--noEmit', '--project', tsconfigPath], { stdio: 'pipe', timeout: 12_000 });
+    if (healTscResult.status === 0) {
       emit('Healer: tsc clean — skipping diagnostic analysis');
       return {
         healed: specContent, removedTests: [], removedTestReasons: {},
         errorCount: 0, wasHealed: false, healedCount: 0,
         hasGlobalErrors: false, missingTypes: false, framework,
       };
-    } catch (err: unknown) {
-      // tsc exited non-zero or was not found — fall through to normal analysis
-      const msg = err instanceof Error ? err.message : String(err);
-      const firstLine = msg.split('\n')[0].trim();
-      emit(`Healer: tsc reported errors — running diagnostic analysis (${firstLine})`);
     }
+    // tsc exited non-zero, was killed (timeout), or executable not found — fall through
+    const rawMsg = healTscResult.error?.message ?? healTscResult.stderr?.toString() ?? '';
+    const firstLine = rawMsg.split('\n')[0].trim();
+    emit(`Healer: tsc reported errors — running diagnostic analysis${firstLine ? ` (${firstLine})` : ''}`);
   }
 
   const compilerOptions = resolveCompilerOptions(sourceFilePath, emit);
