@@ -13,13 +13,13 @@
     "Machine Learning"
   ],
   "activationEvents": [
-    "onStartupFinished",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:javascript",
     "onLanguage:javascriptreact"
   ],
   "main": "./dist/extension.js",
+  "extensionKind": ["workspace"],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
