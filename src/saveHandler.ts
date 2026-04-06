@@ -435,6 +435,7 @@ async function handleFileSave(
   // Workspace trust guard — shell commands (tsc, npm install) require a trusted workspace.
   // See package.json capabilities.untrustedWorkspaces for the manifest declaration.
   if (!vscode.workspace.isTrusted) {
+    log('Skipped: workspace is not trusted — generation disabled');
     if (!untrustedWarningShown) {
       untrustedWarningShown = true;
       void vscode.window.showWarningMessage(
