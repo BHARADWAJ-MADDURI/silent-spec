@@ -330,8 +330,14 @@ export function activate(context: vscode.ExtensionContext) {
     const providerLabel = providerLabels[configuredProvider] ?? 'your configured AI provider';
     void vscode.window.showInformationMessage(
       `SilentSpec sends source code from saved files to ${providerLabel} to generate tests. See the README for full privacy details.`,
-      'Got it'
-    );
+      'Got it',
+      'Learn more'
+    ).then(action => {
+      if (action === 'Learn more') {
+        const readmePath = vscode.Uri.joinPath(context.extensionUri, 'README.md');
+        void vscode.commands.executeCommand('markdown.showPreview', readmePath);
+      }
+    });
   }
 
   const telemetry = new TelemetryService(context, installDate);

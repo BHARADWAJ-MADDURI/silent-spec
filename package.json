@@ -12,6 +12,17 @@
     "Testing",
     "Machine Learning"
   ],
+  "keywords": [
+    "testing",
+    "test generation",
+    "ai",
+    "unit tests",
+    "jest",
+    "vitest",
+    "typescript",
+    "javascript",
+    "automation"
+  ],
   "activationEvents": [
     "onLanguage:typescript",
     "onLanguage:typescriptreact",

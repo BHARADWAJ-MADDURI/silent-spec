@@ -379,8 +379,6 @@ SilentSpec makes exactly the following network requests:
 
 **SilentSpec makes no other network requests.** There is no analytics, telemetry transmission, update check, crash reporting, or any external service beyond the AI providers listed above.
 
-When you click "Show me how" in the tsconfig types warning, your default browser opens `https://silentspec.dev/docs/tsconfig` — this is a standard browser navigation, not an extension-initiated HTTP request.
-
 </details>
 
 <details>
