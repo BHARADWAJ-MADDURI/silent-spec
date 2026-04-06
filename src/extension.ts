@@ -307,8 +307,9 @@ export function activate(context: vscode.ExtensionContext) {
     void (async () => {
       const action = await vscode.window.showInformationMessage('Welcome to SilentSpec! Save any TypeScript file to auto-generate tests.', 'View README', 'Set API Key');
       if (action === 'View README') {
-        const readmePath = vscode.Uri.joinPath(context.extensionUri, 'README.md');
-        void vscode.commands.executeCommand('markdown.showPreview', readmePath);
+        void vscode.env.openExternal(
+          vscode.Uri.parse('https://github.com/bharadwajmadduri/silent-spec#readme')
+        );
       }
       else if (action === 'Set API Key') { void vscode.commands.executeCommand('silentspec.setApiKey'); }
     })();
@@ -334,8 +335,9 @@ export function activate(context: vscode.ExtensionContext) {
       'Learn more'
     ).then(action => {
       if (action === 'Learn more') {
-        const readmePath = vscode.Uri.joinPath(context.extensionUri, 'README.md');
-        void vscode.commands.executeCommand('markdown.showPreview', readmePath);
+        void vscode.env.openExternal(
+          vscode.Uri.parse('https://github.com/bharadwajmadduri/silent-spec#privacy-data--security')
+        );
       }
     });
   }

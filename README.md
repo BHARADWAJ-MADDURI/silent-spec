@@ -18,7 +18,7 @@ SilentSpec generates only the tests you're missing — and never touches the one
 > ✔ Add a function → only that function gets tested
 > ✔ Your hand-written tests are never touched
 
-![SilentSpec Demo](demo.gif)
+![SilentSpec Demo](https://raw.githubusercontent.com/bharadwajmadduri/silent-spec/master/demo.gif)
 
 ---
 
