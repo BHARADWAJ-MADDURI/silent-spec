@@ -17,4 +17,3 @@ vsc-extension-quickstart.md
 **/*.test.ts
 **/__tests__/
 **/*.map
-demo.gif
