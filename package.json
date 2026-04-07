@@ -3,7 +3,7 @@
   "publisher": "bharadwajmadduri",
   "displayName": "SilentSpec",
   "description": "Auto-generates unit tests on file save using AI — silent, surgical, zero friction",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.109.0"
