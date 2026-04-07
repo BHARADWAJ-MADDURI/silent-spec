@@ -1,25 +1,19 @@
-<div align="center">
-  <img src="icon.png" alt="SilentSpec" width="128" />
-  <h1>SilentSpec</h1>
-  <p><strong>Stop rewriting tests every time AI runs.</strong></p>
-  <p>SilentSpec generates only the tests you're missing — and never touches the ones you wrote.</p>
-  <p>
-    <a href="https://marketplace.visualstudio.com/items?itemName=bharadwajmadduri.silent-spec">
-      <img src="https://img.shields.io/visual-studio-marketplace/v/bharadwajmadduri.silent-spec?label=VS%20Code&logo=visual-studio-code&logoColor=white" alt="VS Code Marketplace" />
-    </a>
-    <a href="LICENSE">
-      <img src="https://img.shields.io/github/license/bharadwajmadduri/silent-spec" alt="License" />
-    </a>
-  </p>
-</div>
+![SilentSpec](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/icon.png)
 
-> ✔ Save a file → tests appear beside it
-> ✔ Add a function → only that function gets tested
+# SilentSpec
+
+**Stop rewriting tests every time AI runs.**
+
+SilentSpec generates only the tests you're missing — and never touches the ones you wrote.
+
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/bharadwajmadduri.silent-spec?label=VS%20Code&logo=visual-studio-code&logoColor=white)](https://marketplace.visualstudio.com/items?itemName=bharadwajmadduri.silent-spec)
+[![License](https://img.shields.io/github/license/bharadwajmadduri/silent-spec)](LICENSE)
+
+> ✔ Save a file → tests appear beside it  
+> ✔ Add a function → only that function gets tested  
 > ✔ Your hand-written tests are never touched
 
-![SilentSpec Demo](demo.gif)
-
----
+## ![SilentSpec Demo](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/demo.gif)
 
 ## Before / After
 
