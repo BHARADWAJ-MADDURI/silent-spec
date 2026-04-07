@@ -342,7 +342,7 @@ Cloud providers (GitHub Models, Claude, OpenAI) require internet access for ever
 
 **SilentSpec sends your source code to the configured AI provider on every save that triggers generation.** This is fundamental to how it works — there is no way to generate tests without sending code.
 
-Content transmitted includes: source file content (up to 8,000 characters, with function signatures provided for code beyond that window), exported function signatures, import statements, local dependency signatures for files imported by the source, the first 30 lines of the nearest existing test file in your project (used to match your team's test style), and the filename (not path) of the generated spec file. SilentSpec does not store, cache, or log transmitted code.
+Content transmitted includes: source file content (up to 8,000 characters, with function signatures provided for code beyond that window), exported function signatures, import statements, local dependency signatures for files imported by the source, a sample from the nearest existing test file in your project (up to the first 30 lines, used to match your project’s test style), and the filename (not path) of the generated spec file. SilentSpec does not store, cache, or log transmitted code.
 
 For Ollama, all processing is local — no data leaves your machine. For cloud providers, data is subject to their privacy policies:
 
@@ -446,7 +446,7 @@ This can happen if a generation was interrupted mid-write. Delete the spec file 
 ```bash
 npm install
 npm run compile   # type-check + lint + build
-npm test          # run Jest test suite (97 tests)
+npm test          # run the test suite
 ```
 
 Report bugs and feature requests at [github.com/bharadwajmadduri/silent-spec/issues](https://github.com/bharadwajmadduri/silent-spec/issues).
