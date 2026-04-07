@@ -3,7 +3,6 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/icon.png" alt="SilentSpec" width="128" />
 </p>
-# SilentSpec
 
 **Stop rewriting tests every time AI runs.**
 
