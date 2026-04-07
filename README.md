@@ -1,5 +1,8 @@
-![SilentSpec](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/icon.png)
+<div align="center">
 
+<p align="center">
+  ![SilentSpec](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/icon.png)
+</p>
 # SilentSpec
 
 **Stop rewriting tests every time AI runs.**
@@ -12,6 +15,8 @@ SilentSpec generates only the tests you're missing — and never touches the one
 > ✔ Save a file → tests appear beside it  
 > ✔ Add a function → only that function gets tested  
 > ✔ Your hand-written tests are never touched
+
+</div>
 
 ## ![SilentSpec Demo](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/demo.gif)
 
