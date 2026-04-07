@@ -17,7 +17,7 @@
 > ✔ Add a function → only that function gets tested
 > ✔ Your hand-written tests are never touched
 
-![SilentSpec Demo](https://raw.githubusercontent.com/bharadwajmadduri/silent-spec/master/demo.gif)
+![SilentSpec Demo](demo.gif)
 
 ---
 
