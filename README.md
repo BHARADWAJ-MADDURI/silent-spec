@@ -1,7 +1,7 @@
 <div align="center">
 
 <p align="center">
-  ![SilentSpec](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/icon.png)
+  <img src="https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/icon.png" alt="SilentSpec" width="128" />
 </p>
 # SilentSpec
 
@@ -10,7 +10,7 @@
 SilentSpec generates only the tests you're missing — and never touches the ones you wrote.
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/bharadwajmadduri.silent-spec?label=VS%20Code&logo=visual-studio-code&logoColor=white)](https://marketplace.visualstudio.com/items?itemName=bharadwajmadduri.silent-spec)
-[![License](https://img.shields.io/github/license/bharadwajmadduri/silent-spec)](LICENSE)
+[![License](https://img.shields.io/github/license/BHARADWAJ-MADDURI/silent-spec)](LICENSE)
 
 > ✔ Save a file → tests appear beside it  
 > ✔ Add a function → only that function gets tested  
@@ -18,7 +18,7 @@ SilentSpec generates only the tests you're missing — and never touches the one
 
 </div>
 
-## ![SilentSpec Demo](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/demo.gif)
+![SilentSpec Demo](https://raw.githubusercontent.com/BHARADWAJ-MADDURI/silent-spec/master/demo.gif)
 
 ## Before / After
 
@@ -448,7 +448,7 @@ npm run compile   # type-check + lint + build
 npm test          # run the test suite
 ```
 
-Report bugs and feature requests at [github.com/bharadwajmadduri/silent-spec/issues](https://github.com/bharadwajmadduri/silent-spec/issues).
+Report bugs and feature requests at [github.com/BHARADWAJ-MADDURI/silent-spec/issues](https://github.com/BHARADWAJ-MADDURI/silent-spec/issues).
 
 ---
 
