@@ -206,12 +206,17 @@ Save any `.ts`, `.tsx`, `.js`, or `.jsx` file that exports functions. A spec fil
 
 ### Provider Setup
 
-| Provider                    | Setting value | Credential                   | Notes                                              |
-| --------------------------- | ------------- | ---------------------------- | -------------------------------------------------- |
-| **GitHub Models** (default) | `github`      | GitHub Personal Access Token | Free, ~50 requests/day. No credit card.            |
-| **Ollama** (local)          | `ollama`      | None                         | Auto-detected on activation. No internet required. |
-| **Claude**                  | `claude`      | Anthropic API key            | ~$0.003/generation. Best output quality.           |
-| **OpenAI**                  | `openai`      | OpenAI API key               | ~$0.003/generation.                                |
+| Provider                    | Setting value | Credential                   | Notes                                                             |
+| --------------------------- | ------------- | ---------------------------- | ----------------------------------------------------------------- |
+| **GitHub Models** (default) | `github`      | GitHub Personal Access Token | Free, ~50 requests/day. No credit card.                           |
+| **Ollama** (local)          | `ollama`      | None                         | Auto-detected on activation. No internet required.                |
+| **Claude**                  | `claude`      | Anthropic API key            | ~$0.003/generation. Best output quality.                          |
+| **OpenAI**                  | `openai`      | OpenAI API key               | ~$0.003/generation.                                               |
+| **Azure OpenAI**            | `azure`       | Azure OpenAI API key         | Uses your Azure endpoint + deployment name.                       |
+| **OpenAI-compatible**       | `compat`      | Provider API key             | Works with Groq, Together, Fireworks, DeepSeek.                   |
+| **vLLM** (local)            | `vllm`        | None                         | Self-hosted OpenAI-compatible server.                             |
+| **AWS Bedrock**             | `bedrock`     | AWS credentials              | Claude models on Bedrock via IAM, profile, or static credentials. |
+| **Google Vertex AI**        | `vertex`      | ADC or service account file  | Supports Gemini and Claude on Vertex.                             |
 
 Set your provider: VS Code Settings → search `silentspec.provider`.
 
@@ -239,18 +244,40 @@ Set your API key: Command Palette (`Cmd/Ctrl+Shift+P`) → **SilentSpec: Set API
 
 Framework is detected by walking up from the saved file to the nearest `package.json` that declares a known test framework. Monorepo sub-packages are detected independently.
 
+Works best today for exported JavaScript/TypeScript functions, utilities, and Node.js service code.
+
 ---
 
 ## Provider Comparison
 
-| Provider      | Default Model                          | Free? | Credential        | Rate Limit   | Approx Cost        |
-| ------------- | -------------------------------------- | ----- | ----------------- | ------------ | ------------------ |
-| GitHub Models | `gpt-4o`                               | Yes   | GitHub PAT        | ~50 req/day  | Free               |
-| Ollama        | auto (`deepseek-coder:6.7b` preferred) | Yes   | None              | None (local) | Free               |
-| Claude        | `claude-sonnet-4-6`                    | No    | Anthropic API key | Per plan     | ~$0.003/generation |
-| OpenAI        | `gpt-4o`                               | No    | OpenAI API key    | Per plan     | ~$0.003/generation |
+| Provider      | Default Model                               | Free?   | Credential        | Rate Limit   | Approx Cost        |
+| ------------- | ------------------------------------------- | ------- | ----------------- | ------------ | ------------------ |
+| GitHub Models | `gpt-4o`                                    | Yes     | GitHub PAT        | ~50 req/day  | Free               |
+| Ollama        | auto (`deepseek-coder:6.7b` preferred)      | Yes     | None              | None (local) | Free               |
+| Claude        | `claude-sonnet-4-6`                         | No      | Anthropic API key | Per plan     | ~$0.003/generation |
+| OpenAI        | `gpt-4o`                                    | No      | OpenAI API key    | Per plan     | ~$0.003/generation |
+| Azure OpenAI  | deployment-configured                       | No      | Azure API key     | Per plan     | Azure pricing      |
+| Compat        | provider-configured                         | Usually | Provider API key  | Per provider | Provider pricing   |
+| vLLM          | user-configured                             | Yes     | None              | None (local) | Local compute      |
+| AWS Bedrock   | `anthropic.claude-3-5-sonnet-20241022-v2:0` | No      | AWS credentials   | Per plan     | AWS pricing        |
+| Vertex AI     | `gemini-2.0-flash`                          | No      | ADC / key file    | Per plan     | GCP pricing        |
 
 Ollama model selection: SilentSpec prefers `deepseek-coder:6.7b` → `deepseek-coder` → `codellama` → `llama3.2` in order of preference, picking the first installed model. Override with `silentspec.model`.
+
+`silentspec.model` is a legacy override for Ollama, Claude, OpenAI, and GitHub Models. Azure, Bedrock, Vertex, OpenAI-compatible providers, and vLLM use their provider-specific model or deployment settings instead.
+
+OpenAI-compatible examples:
+
+| Provider     | `silentspec.compat.baseUrl`             | Example model                                       |
+| ------------ | --------------------------------------- | --------------------------------------------------- |
+| Groq         | `https://api.groq.com/openai/v1`        | `llama-3.3-70b-versatile`                           |
+| Together AI  | `https://api.together.xyz/v1`           | `meta-llama/Llama-3-70b-chat-hf`                    |
+| Fireworks AI | `https://api.fireworks.ai/inference/v1` | `accounts/fireworks/models/llama-v3p3-70b-instruct` |
+| DeepSeek     | `https://api.deepseek.com/v1`           | `deepseek-chat`                                     |
+
+Bedrock V1.1 supports Claude models on Bedrock only. Enable the selected model in AWS Console > Bedrock > Model Access before using it. Other Bedrock model families such as Llama, Mistral, Titan, and Cohere require additional request/response dispatch logic and are not supported by this provider yet.
+
+Azure OpenAI uses deployment names, not raw model IDs. Set `silentspec.azure.deploymentName` to the exact deployment name from the Azure AI Foundry portal.
 
 ---
 
@@ -260,12 +287,17 @@ Ollama model selection: SilentSpec prefers `deepseek-coder:6.7b` → `deepseek-c
 | Setting                          | Type        | Default                       | Description                                                                                                                                                                                     |
 | -------------------------------- | ----------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `silentspec.enabled`             | boolean     | `true`                        | Enable or disable all automatic test generation.                                                                                                                                                |
-| `silentspec.provider`            | string enum | `"github"`                    | AI provider: `github`, `claude`, `openai`, `ollama`.                                                                                                                                            |
-| `silentspec.model`               | string      | `""`                          | Model override. Leave empty to use the provider default.                                                                                                                                        |
+| `silentspec.provider`            | string enum | `"github"`                    | AI provider: `github`, `claude`, `openai`, `ollama`, `azure`, `compat`, `vllm`, `bedrock`, or `vertex`.                                                                                         |
+| `silentspec.model`               | string      | `""`                          | Legacy model override for Ollama, Claude, OpenAI, and GitHub Models. Provider-specific backends use their own model/deployment settings.                                                        |
 | `silentspec.supportedExtensions` | string[]    | `[".ts",".tsx",".js",".jsx"]` | File extensions that trigger generation.                                                                                                                                                        |
 | `silentspec.openSpecOnCreate`    | boolean     | `true`                        | Open the spec file in a split panel when first created.                                                                                                                                         |
 | `silentspec.aiTimeoutSeconds`    | number      | `60`                          | Timeout for AI provider calls in seconds. Increase for slow connections or large files.                                                                                                         |
 | `silentspec.maxFunctionsPerRun`  | number      | `5`                           | Max functions per AI call. GitHub Models is additionally capped at 2–3 functions to stay within the free tier's output token limit. Recommended: 3–5 for free-tier providers, up to 8 for paid. |
+| `silentspec.azure.*`             | string      | varies                        | Azure OpenAI endpoint, deployment name, and API version.                                                                                                                                        |
+| `silentspec.compat.*`            | string      | varies                        | Base URL, model, and label for an OpenAI-compatible provider.                                                                                                                                   |
+| `silentspec.vllm.*`              | string/bool | varies                        | vLLM base URL, served model, and auto-detect toggle.                                                                                                                                            |
+| `silentspec.bedrock.*`           | string      | varies                        | Bedrock region, model ID, profile, and auth mode. Static credentials are stored via the command palette.                                                                                        |
+| `silentspec.vertex.*`            | string/bool | varies                        | Vertex project, location, model, service account key path, and ADC toggle.                                                                                                                      |
 
 </details>
 
@@ -303,7 +335,7 @@ All commands are available via the Command Palette (`Cmd/Ctrl+Shift+P`):
 
 SilentSpec never modifies source files, `node_modules`, `package.json`, or any file that does not have SilentSpec zone markers. It never modifies unmanaged test files.
 
-**Preflight auto-install:** when `@types/jest` (or equivalent) is missing, SilentSpec attempts a silent install before the first generation. This modifies `node_modules` and the lock file, but not your source code. If the install fails, SilentSpec continues in safe mode and shows a notification with the manual install command.
+**Preflight dependency install:** when `@types/jest` (or equivalent) is missing, SilentSpec asks before running the package-manager install command. If you choose not to install, SilentSpec continues in safe mode and offers the manual command instead of modifying `node_modules` or lock files.
 
 ### On Uninstall
 
@@ -315,7 +347,7 @@ Generated spec files remain on disk — they are yours. VS Code cleans up `globa
 
 The Ollama provider works fully offline. Framework detection, AST analysis, zone parsing, and the healer all run locally using the TypeScript compiler API — no network required for these steps. Only the AI generation step requires a provider connection.
 
-Cloud providers (GitHub Models, Claude, OpenAI) require internet access for every generation call.
+Cloud providers (GitHub Models, Claude, OpenAI, Azure OpenAI, OpenAI-compatible providers, AWS Bedrock, and Google Vertex AI) require internet access for every generation call.
 
 ---
 
@@ -342,13 +374,19 @@ Cloud providers (GitHub Models, Claude, OpenAI) require internet access for ever
 
 Content transmitted includes: source file content (up to 8,000 characters, with function signatures provided for code beyond that window), exported function signatures, import statements, local dependency signatures for files imported by the source, a sample from the nearest existing test file in your project (up to the first 30 lines, used to match your project’s test style), and the filename (not path) of the generated spec file. SilentSpec does not store, cache, or log transmitted code.
 
-For Ollama, all processing is local — no data leaves your machine. For cloud providers, data is subject to their privacy policies:
+For Ollama and vLLM pointed at a local server, generation can remain local. SilentSpec blocks remote vLLM URLs and only allows localhost-style vLLM endpoints (`localhost`, `127.0.0.1`, or `[::1]`). For cloud providers or externally hosted OpenAI-compatible endpoints, data is subject to that provider's privacy policies:
 
 - OpenAI: https://openai.com/policies/privacy-policy
 - Anthropic: https://www.anthropic.com/privacy
 - GitHub (Models): https://docs.github.com/en/site-policy/privacy-policies
+- Azure OpenAI: https://privacy.microsoft.com/privacystatement
+- AWS Bedrock: https://aws.amazon.com/privacy/
+- Google Vertex AI: https://policies.google.com/privacy
+- Groq (default OpenAI-compatible provider): https://groq.com/privacy-policy/
 
 By using a cloud provider, you accept their data processing terms. Review your provider's policy before using SilentSpec on proprietary or sensitive code.
+
+OpenAI-compatible URLs are restricted to documented HTTPS providers: Groq, Together AI, Fireworks AI, and DeepSeek. Azure OpenAI endpoints are restricted to HTTPS Azure resource domains ending in `openai.azure.com` or `cognitiveservices.azure.com`. Vertex locations are validated as GCP region strings before a Vertex hostname is constructed.
 
 </details>
 
@@ -357,24 +395,30 @@ By using a cloud provider, you accept their data processing terms. Review your p
 
 API keys and tokens are stored using VS Code's `SecretStorage` API (`context.secrets`), which VS Code encrypts using the OS keychain — Keychain on macOS, Credential Manager on Windows, libsecret on Linux.
 
-Keys are stored under these identifiers: `silentspec.githubToken`, `silentspec.claudeApiKey`, `silentspec.openaiApiKey`. They never appear in `settings.json`, output logs, or telemetry. All error messages pass through `redactSecrets()` before being logged, which strips Bearer tokens, `sk-*` API keys, `ghp_*` GitHub tokens, and `key-*` prefixed tokens from any log output.
+Keys are stored under these identifiers: `silentspec.githubToken`, `silentspec.claudeApiKey`, `silentspec.openaiApiKey`, `silentspec.azureApiKey`, `silentspec.compatApiKey`, `silentspec.bedrockAccessKeyId`, and `silentspec.bedrockSecretAccessKey`. Vertex AI uses Application Default Credentials or a service account key file path configured in settings. SecretStorage-backed keys never appear in `settings.json`, and provider error logs use best-effort secret redaction before writing to the output channel.
 
 </details>
 
 <details>
 <summary><strong>Network Requests — Complete Disclosure</strong></summary>
 
-SilentSpec makes exactly the following network requests:
+SilentSpec makes the following network requests depending on the configured provider:
 
-| Request                  | When                             | Endpoint                                                 |
-| ------------------------ | -------------------------------- | -------------------------------------------------------- |
-| Ollama health check      | Once on VS Code activation       | `http://localhost:11434/api/tags`                        |
-| Ollama generation        | On save (Ollama provider)        | `http://localhost:11434/api/generate`                    |
-| GitHub Models generation | On save (GitHub Models provider) | `https://models.inference.ai.azure.com/chat/completions` |
-| Claude generation        | On save (Claude provider)        | `https://api.anthropic.com/v1/messages`                  |
-| OpenAI generation        | On save (OpenAI provider)        | `https://api.openai.com/v1/chat/completions`             |
+| Request                  | When                             | Endpoint                                                     |
+| ------------------------ | -------------------------------- | ------------------------------------------------------------ |
+| Ollama health check      | Once on VS Code activation       | `http://localhost:11434/api/tags`                            |
+| Ollama generation        | On save (Ollama provider)        | `http://localhost:11434/api/generate`                        |
+| GitHub Models generation | On save (GitHub Models provider) | `https://models.inference.ai.azure.com/chat/completions`     |
+| Claude generation        | On save (Claude provider)        | `https://api.anthropic.com/v1/messages`                      |
+| OpenAI generation        | On save (OpenAI provider)        | `https://api.openai.com/v1/chat/completions`                 |
+| Azure OpenAI generation  | On save (Azure provider)         | Your configured Azure OpenAI endpoint                        |
+| Compat generation        | On save (compat provider)        | Your configured allowlisted HTTPS OpenAI-compatible base URL |
+| vLLM health check        | Once on VS Code activation       | Your configured local vLLM `/v1/models` endpoint             |
+| vLLM generation          | On save (vLLM provider)          | Your configured local vLLM `/chat/completions` endpoint      |
+| AWS Bedrock generation   | On save (Bedrock provider)       | AWS Bedrock Runtime in your configured region                |
+| Vertex AI generation     | On save (Vertex provider)        | Google Vertex AI endpoint for your project/location          |
 
-**SilentSpec makes no other network requests.** There is no analytics, telemetry transmission, update check, crash reporting, or any external service beyond the AI providers listed above.
+There is no analytics, telemetry transmission, update check, crash reporting, or external service beyond the configured AI provider calls listed above.
 
 </details>
 
@@ -395,7 +439,7 @@ There are no `fetch`, HTTP, or WebSocket imports in `src/telemetry.ts`. The only
 - No file paths in telemetry
 - No prompt text stored after generation
 - No generated test content in telemetry
-- No API keys in logs (redactSecrets verified on all provider error paths)
+- SecretStorage-backed API keys are redacted from provider error logs on a best-effort basis
 - Function names stored as identifiers only — no code bodies in telemetry
 - No cookies, browser fingerprinting, or user identification of any kind
 

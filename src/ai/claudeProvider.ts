@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
 import { redactSecrets } from '../utils/validateResponse';
+import { shouldShowNotification } from '../utils/notificationCooldown';
 
 // Model is intentionally empty — resolved at runtime from user settings.
 // Fallback is the current recommended Claude model.
@@ -98,14 +99,16 @@ export class ClaudeProvider implements AIProvider {
         if (response.status === 401) {
           log('Error: Claude API key rejected (401) — key may be expired or revoked');
           await this.secrets.delete('silentspec.claudeApiKey');
-          void vscode.window.showWarningMessage(
-            'SilentSpec: Your Claude API key was rejected. It may have expired or been revoked.',
-            'Set Up New Key'
-          ).then(action => {
-            if (action === 'Set Up New Key') {
-              void vscode.commands.executeCommand('silentspec.setApiKey');
-            }
-          });
+          if (shouldShowNotification('claude-auth-rejected')) {
+            void vscode.window.showWarningMessage(
+              'SilentSpec: Your Claude API key was rejected. It may have expired or been revoked.',
+              'Set Up New Key'
+            ).then(action => {
+              if (action === 'Set Up New Key') {
+                void vscode.commands.executeCommand('silentspec.setApiKey');
+              }
+            });
+          }
           return null;
         }
 
@@ -141,7 +144,7 @@ export class ClaudeProvider implements AIProvider {
       }
 
       const msg = error instanceof Error ? error.message : String(error);
-      log(`Error: Claude API call failed — ${msg}`);
+      log(`Error: Claude API call failed — ${redactSecrets(msg)}`);
       return null;
     }
   }

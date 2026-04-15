@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
 import { redactSecrets } from '../utils/validateResponse';
+import { shouldShowNotification } from '../utils/notificationCooldown';
 
 // Model is intentionally empty — resolved at runtime from user settings.
 // Fallback is the current recommended OpenAI model.
@@ -99,14 +100,16 @@ export class OpenAIProvider implements AIProvider {
         if (response.status === 401) {
           log('Error: OpenAI API key rejected (401) — key may be expired or revoked');
           await this.secrets.delete('silentspec.openaiApiKey');
-          void vscode.window.showWarningMessage(
-            'SilentSpec: Your OpenAI API key was rejected. It may have expired or been revoked.',
-            'Set Up New Key'
-          ).then(action => {
-            if (action === 'Set Up New Key') {
-              void vscode.commands.executeCommand('silentspec.setApiKey');
-            }
-          });
+          if (shouldShowNotification('openai-auth-rejected')) {
+            void vscode.window.showWarningMessage(
+              'SilentSpec: Your OpenAI API key was rejected. It may have expired or been revoked.',
+              'Set Up New Key'
+            ).then(action => {
+              if (action === 'Set Up New Key') {
+                void vscode.commands.executeCommand('silentspec.setApiKey');
+              }
+            });
+          }
           return null;
         }
 

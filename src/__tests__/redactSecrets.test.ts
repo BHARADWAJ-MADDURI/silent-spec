@@ -35,6 +35,13 @@ test('redacts a GitHub PAT with ghp_ prefix', () => {
   expect(result).not.toContain(token);
 });
 
+test('redacts a GitHub fine-grained PAT with github_pat_ prefix', () => {
+  const token = 'github_pat_' + 'A'.repeat(48);
+  const result = redactSecrets(`auth failed for token ${token}`);
+  expect(result).toContain('github_pat_[REDACTED]');
+  expect(result).not.toContain(token);
+});
+
 test('does not redact a short ghp_ string below the threshold', () => {
   // ghp_ + 35 chars — just under the 36-char threshold
   const short = 'ghp_' + 'A'.repeat(35);
@@ -46,6 +53,22 @@ test('does not redact a short ghp_ string below the threshold', () => {
 test('redacts a key- prefixed token', () => {
   const result = redactSecrets('key-abcdefghijklmnopqrstuvwxyz1234567890');
   expect(result).toContain('key-[REDACTED]');
+});
+
+test('redacts provider-specific cloud tokens', () => {
+  const azureKey = '0123456789abcdef0123456789abcdef';
+  const awsAccessKey = 'AKIAIOSFODNN7EXAMPLE';
+  const awsSecretKey = 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY';
+  const googleToken = `ya29.${'A'.repeat(40)}`;
+  const result = redactSecrets(`azure=${azureKey} aws=${awsAccessKey} secretAccessKey=${awsSecretKey} google=${googleToken}`);
+  expect(result).toContain('[AZURE_KEY_REDACTED]');
+  expect(result).toContain('[AWS_ACCESS_KEY_ID_REDACTED]');
+  expect(result).toContain('secretAccessKey=[AWS_SECRET_ACCESS_KEY_REDACTED]');
+  expect(result).toContain('ya29.[REDACTED]');
+  expect(result).not.toContain(azureKey);
+  expect(result).not.toContain(awsAccessKey);
+  expect(result).not.toContain(awsSecretKey);
+  expect(result).not.toContain(googleToken);
 });
 
 // ── Non-secret content passes through unchanged ──────────────────────────────

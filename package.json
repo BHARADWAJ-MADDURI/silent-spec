@@ -3,7 +3,7 @@
   "publisher": "bharadwajmadduri",
   "displayName": "SilentSpec",
   "description": "Auto-generates unit tests on file save using AI — silent, surgical, zero friction",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.109.0"
@@ -74,9 +74,10 @@
         "title": "SilentSpec: Explain Failure"
       }
     ],
-    "configuration": {
-      "title": "SilentSpec",
-      "properties": {
+    "configuration": [
+      {
+        "title": "SilentSpec: Core",
+        "properties": {
         "silentspec.enabled": {
           "type": "boolean",
           "default": true,
@@ -98,13 +99,23 @@
             "ollama",
             "claude",
             "openai",
-            "github"
+            "github",
+            "azure",
+            "compat",
+            "vllm",
+            "bedrock",
+            "vertex"
           ],
           "enumDescriptions": [
             "Free local generation via Ollama — no API key needed",
             "Claude (Anthropic) — best quality, requires API key",
             "GPT-4o (OpenAI) — requires API key",
-            "GitHub Models — free tier, requires GitHub Personal Access Token"
+            "GitHub Models — free tier, requires GitHub Personal Access Token",
+            "Azure OpenAI — requires Azure endpoint, deployment, and API key",
+            "OpenAI-compatible API — works with Groq, Together, Fireworks, DeepSeek, and similar providers",
+            "vLLM — self-hosted OpenAI-compatible server",
+            "AWS Bedrock — supports Claude models on Bedrock",
+            "Google Vertex AI — supports Gemini and Claude on Vertex"
           ],
           "default": "github",
           "description": "AI provider for test generation. Use 'ollama' for free local generation."
@@ -113,7 +124,7 @@
           "type": "string",
           "default": "",
           "description": "Model override. Leave empty for provider default.",
-          "markdownDescription": "Leave empty to use defaults: `deepseek-coder:6.7b` (Ollama) / `claude-sonnet-4-6` (Claude) / `gpt-4o` (OpenAI) / `gpt-4o` (GitHub Models)"
+          "markdownDescription": "Legacy model override for Ollama, Claude, OpenAI, and GitHub Models. Leave empty to use provider defaults. Azure, Bedrock, Vertex, compat, and vLLM use their provider-specific model/deployment settings."
         },
         "silentspec.openSpecOnCreate": {
           "type": "boolean",
@@ -131,7 +142,135 @@
           "description": "Hard cap on functions per AI call. Adaptive logic auto-reduces to 5 for files >12k chars (important for GitHub Models free tier). Set to 3-5 for free-tier providers, 8 for paid APIs."
         }
       }
+    },
+      {
+        "title": "SilentSpec: Azure OpenAI",
+        "properties": {
+        "silentspec.azure.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI resource endpoint, for example https://your-resource.openai.azure.com",
+          "markdownDescription": "Azure OpenAI resource endpoint. Must be an HTTPS Azure resource URL ending in `openai.azure.com` or `cognitiveservices.azure.com`, for example `https://your-resource.openai.azure.com`."
+        },
+        "silentspec.azure.deploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI deployment name to use for chat completions.",
+          "markdownDescription": "Your Azure OpenAI deployment name. Must match exactly what you named it in the **Azure AI Foundry portal** under Deployments. Example: if you created a deployment called `my-gpt4`, enter `my-gpt4` here."
+        },
+        "silentspec.azure.apiVersion": {
+          "type": "string",
+          "default": "2024-02-01",
+          "description": "Azure OpenAI API version."
+        }
+      }
+    },
+      {
+        "title": "SilentSpec: OpenAI Compatible",
+        "properties": {
+        "silentspec.compat.baseUrl": {
+          "type": "string",
+          "default": "https://api.groq.com/openai/v1",
+          "description": "Base URL for an OpenAI-compatible provider.",
+          "markdownDescription": "Base URL for a supported HTTPS OpenAI-compatible provider. Allowed hosted providers: Groq (`https://api.groq.com/openai/v1`), Together AI (`https://api.together.xyz/v1`), Fireworks AI (`https://api.fireworks.ai/inference/v1`), and DeepSeek (`https://api.deepseek.com/v1`)."
+        },
+        "silentspec.compat.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name for the OpenAI-compatible provider."
+        },
+        "silentspec.compat.providerLabel": {
+          "type": "string",
+          "default": "Groq",
+          "description": "Display label for the OpenAI-compatible provider in messages and the status bar."
+        }
+      }
+    },
+      {
+        "title": "SilentSpec: vLLM",
+        "properties": {
+        "silentspec.vllm.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/v1",
+          "description": "Base URL for a local vLLM server.",
+          "markdownDescription": "Base URL for a local vLLM server. Must point to `localhost`, `127.0.0.1`, or `[::1]`; remote vLLM URLs are blocked because source code is sent in the request body."
+        },
+        "silentspec.vllm.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name served by vLLM."
+        },
+        "silentspec.vllm.autoDetect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-detect a local vLLM server on activation when no provider is explicitly configured."
+        }
+      }
+    },
+      {
+        "title": "SilentSpec: AWS Bedrock",
+        "properties": {
+        "silentspec.bedrock.region": {
+          "type": "string",
+          "default": "us-east-1",
+          "description": "AWS region for Amazon Bedrock."
+        },
+        "silentspec.bedrock.modelId": {
+          "type": "string",
+          "default": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+          "description": "Bedrock Claude model ID to invoke.",
+          "markdownDescription": "Bedrock model ID for Claude models. Must be enabled in AWS Console > Bedrock > Model Access. Example: `anthropic.claude-3-5-sonnet-20241022-v2:0`. V1.1 supports Claude-on-Bedrock only; other model families require additional dispatch logic."
+        },
+        "silentspec.bedrock.profile": {
+          "type": "string",
+          "default": "",
+          "description": "AWS shared credentials profile name when auth mode is profile."
+        },
+        "silentspec.bedrock.authMode": {
+          "type": "string",
+          "enum": [
+            "iam",
+            "profile",
+            "static"
+          ],
+          "default": "iam",
+          "description": "Authentication mode for Bedrock: default AWS chain, shared profile, or static credentials stored in SecretStorage."
+        }
+      }
+    },
+      {
+        "title": "SilentSpec: Google Vertex AI",
+        "properties": {
+        "silentspec.vertex.projectId": {
+          "type": "string",
+          "default": "",
+          "description": "Google Cloud project ID for Vertex AI."
+        },
+        "silentspec.vertex.location": {
+          "type": "string",
+          "default": "us-central1",
+          "description": "Vertex AI location.",
+          "markdownDescription": "Vertex AI location, such as `us-central1` or `europe-west4`. Must be a valid GCP region string; arbitrary hostnames or paths are rejected."
+        },
+        "silentspec.vertex.model": {
+          "type": "string",
+          "default": "gemini-2.0-flash",
+          "description": "Vertex AI model name. Supports Gemini models and Claude models on Vertex.",
+          "markdownDescription": "Vertex AI model name. Examples: `gemini-2.0-flash`, `gemini-1.5-pro`, `claude-3-5-sonnet@20241022`. Claude models on Vertex require Model Garden enablement and Anthropic terms acceptance."
+        },
+        "silentspec.vertex.serviceAccountKeyPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a Vertex AI service account key JSON file when not using ADC."
+        },
+        "silentspec.vertex.useADC": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Application Default Credentials for Vertex AI instead of a key file."
+        }
+      }
     }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -140,7 +279,7 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-types && npm run lint && node esbuild.js --production",
-    "compile-tests": "tsc -p . --outDir out",
+    "compile-tests": "node -e \"require('fs').rmSync('out/test',{recursive:true,force:true})\" && tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
@@ -148,7 +287,8 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:unit": "jest --runInBand",
-    "test:integration": "vscode-test"
+    "test:integration": "vscode-test",
+    "test:e2e": "npm run compile-tests && npm run compile && vscode-test"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
@@ -166,7 +306,10 @@
     "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
-    "@typescript-eslint/typescript-estree": "^8.56.1"
+    "@aws-sdk/client-bedrock-runtime": "^3.1027.0",
+    "@aws-sdk/credential-providers": "^3.1027.0",
+    "@typescript-eslint/typescript-estree": "^8.56.1",
+    "google-auth-library": "^10.6.2"
   },
   "repository": {
     "type": "git",

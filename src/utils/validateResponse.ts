@@ -1,6 +1,6 @@
 /**
  * Redacts high-confidence secret patterns from a string before it is logged.
- * Targets: Bearer tokens, sk-... keys, ghp_... GitHub tokens, key-... prefixed tokens.
+ * Targets: common provider API keys and OAuth tokens that can appear in error bodies.
  * Non-secret content (error messages, status codes, endpoint URLs) passes through unchanged.
  */
 export function redactSecrets(message: string): string {
@@ -11,8 +11,23 @@ export function redactSecrets(message: string): string {
     .replace(/\bsk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]')
     // GitHub personal access tokens: ghp_<36+ alphanumeric chars>
     .replace(/\bghp_[A-Za-z0-9]{36,}/g, 'ghp_[REDACTED]')
+    // GitHub fine-grained personal access tokens
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_[REDACTED]')
     // Generic key- prefixed tokens: key-<20+ alphanumeric/dash/underscore chars>
-    .replace(/\bkey-[A-Za-z0-9_-]{20,}/g, 'key-[REDACTED]');
+    .replace(/\bkey-[A-Za-z0-9_-]{20,}/g, 'key-[REDACTED]')
+    // AWS access key IDs
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[AWS_ACCESS_KEY_ID_REDACTED]')
+    // AWS secret access keys when an SDK/error body labels the field. A bare
+    // 40-character secret has too many false positives to redact safely.
+    .replace(
+      /\b(aws_secret_access_key|secretAccessKey|SecretAccessKey|secret access key)\s*[:=]\s*["']?[A-Za-z0-9/+=]{40}["']?/gi,
+      '$1=[AWS_SECRET_ACCESS_KEY_REDACTED]'
+    )
+    // Google OAuth access tokens
+    .replace(/\bya29\.[A-Za-z0-9._-]{20,}/g, 'ya29.[REDACTED]')
+    // Azure OpenAI keys are commonly 32-character hex strings. Keep this narrow
+    // to avoid redacting arbitrary words or request IDs.
+    .replace(/\b[a-fA-F0-9]{32}\b/g, '[AZURE_KEY_REDACTED]');
 }
 
 export function validateResponse(

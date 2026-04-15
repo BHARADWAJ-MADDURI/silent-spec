@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AIProvider } from './aiProvider';
 import { redactSecrets } from '../utils/validateResponse';
+import { shouldShowNotification } from '../utils/notificationCooldown';
 
 // Model is intentionally empty — resolved at runtime from user settings.
 // Fallback is the current recommended GitHub Models default.
@@ -99,14 +100,16 @@ export class GitHubModelsProvider implements AIProvider {
         if (response.status === 401) {
           log('Error: GitHub token rejected (401) — token may be expired or revoked');
           await this.secrets.delete('silentspec.githubToken');
-          void vscode.window.showWarningMessage(
-            'SilentSpec: Your GitHub token was rejected. It may have expired or been revoked.',
-            'Set Up New Token'
-          ).then(action => {
-            if (action === 'Set Up New Token') {
-              void vscode.commands.executeCommand('silentspec.setApiKey');
-            }
-          });
+          if (shouldShowNotification('github-auth-rejected')) {
+            void vscode.window.showWarningMessage(
+              'SilentSpec: Your GitHub token was rejected. It may have expired or been revoked.',
+              'Set Up New Token'
+            ).then(action => {
+              if (action === 'Set Up New Token') {
+                void vscode.commands.executeCommand('silentspec.setApiKey');
+              }
+            });
+          }
           return null;
         }
 
