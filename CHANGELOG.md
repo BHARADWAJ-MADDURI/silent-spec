@@ -6,6 +6,12 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-04-15
+
+### Changed
+
+- Replaced the Marketplace version badge with a plain install link to avoid stale badge status confusion.
+
 ## [1.0.0] - 2026-04-05
 
 ### Added
