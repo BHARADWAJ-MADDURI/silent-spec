@@ -1,4 +1,5 @@
 import { AIProvider } from './aiProvider';
+import { redactSecrets } from '../utils/validateResponse';
 
 const OLLAMA_BASE_URL = 'http://localhost:11434';
 
@@ -115,7 +116,7 @@ export class OllamaProvider implements AIProvider {
 
       if (!response.ok) {
         const text = await response.text();
-        log(`Ollama error ${response.status}: ${text}`);
+        log(`Ollama error ${response.status}: ${redactSecrets(text)}`);
         // D2 fix: if Ollama says the model doesn't exist, clear the cached model so
         // the next request re-detects a currently-available model. Only clears the
         // auto-resolved model, not a user-configured override.
@@ -149,7 +150,7 @@ export class OllamaProvider implements AIProvider {
       }
 
       const msg = error instanceof Error ? error.message : String(error);
-      log(`Ollama: unexpected error — ${msg}`);
+      log(`Ollama: unexpected error — ${redactSecrets(msg)}`);
       return null;
     }
   }

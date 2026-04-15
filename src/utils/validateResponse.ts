@@ -9,12 +9,17 @@ export function redactSecrets(message: string): string {
     .replace(/Bearer\s+\S{20,}/g, 'Bearer [REDACTED]')
     // OpenAI / Anthropic API keys: sk-<20+ alphanumeric/dash/underscore chars>
     .replace(/\bsk-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]')
-    // GitHub personal access tokens: ghp_<36+ alphanumeric chars>
-    .replace(/\bghp_[A-Za-z0-9]{36,}/g, 'ghp_[REDACTED]')
+    // GitHub personal access tokens: ghp_/gho_/ghu_/ghs_/ghr_ + 36+ chars
+    .replace(/\b(gh[pousr]_)[A-Za-z0-9]{36,}/g, '$1[REDACTED]')
     // GitHub fine-grained personal access tokens
     .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_[REDACTED]')
     // Generic key- prefixed tokens: key-<20+ alphanumeric/dash/underscore chars>
     .replace(/\bkey-[A-Za-z0-9_-]{20,}/g, 'key-[REDACTED]')
+    // Labeled API key headers/fields, including Azure api-key and Anthropic x-api-key.
+    .replace(
+      /\b(api-key|x-api-key|azureApiKey|azure_api_key)\s*[:=]\s*["']?[A-Za-z0-9/_+=.-]{20,}["']?/gi,
+      '$1=[API_KEY_REDACTED]'
+    )
     // AWS access key IDs
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[AWS_ACCESS_KEY_ID_REDACTED]')
     // AWS secret access keys when an SDK/error body labels the field. A bare

@@ -140,7 +140,7 @@ export class OpenAIProvider implements AIProvider {
       }
 
       const msg = error instanceof Error ? error.message : String(error);
-      log(`Error: OpenAI API call failed — ${msg}`);
+      log(`Error: OpenAI API call failed — ${redactSecrets(msg)}`);
       return null;
     }
   }

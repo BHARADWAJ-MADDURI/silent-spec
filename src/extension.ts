@@ -57,6 +57,7 @@ const MAX_QUEUE_DEPTH = 5;
 // Tracks concurrent generations — status bar only transitions to Done/Partial/Error
 // when this reaches 0, preventing flicker when two files save simultaneously.
 let activeGenerations = 0;
+let manualUntrustedWarningShown = false;
 
 // Adaptive batch sizing — scales down for large files to avoid token overflow.
 // Uses file content length as a proxy since AST has no per-function line counts.
@@ -146,6 +147,23 @@ function showProviderFailureToast(filePath: string, providerName: string, kind: 
   } else {
     void vscode.window.showWarningMessage(msg);
   }
+}
+
+function ensureTrustedForManualGeneration(log?: (msg: string) => void): boolean {
+  if (vscode.workspace.isTrusted) { return true; }
+  log?.('Skipped: workspace is not trusted — generation disabled');
+  if (!manualUntrustedWarningShown) {
+    manualUntrustedWarningShown = true;
+    void vscode.window.showWarningMessage(
+      'SilentSpec: this workspace is not trusted — generation is disabled.',
+      'Trust Workspace'
+    ).then(action => {
+      if (action === 'Trust Workspace') {
+        void vscode.commands.executeCommand('workbench.action.manageTrust');
+      }
+    });
+  }
+  return false;
 }
 
 async function isOllamaRunning(): Promise<boolean> {
@@ -621,6 +639,7 @@ export function activate(context: vscode.ExtensionContext) {
     const filePath = editor.document.uri.fsPath;
     if (/\.(test|spec)\.[tj]sx?$/.test(filePath)) { vscode.window.showWarningMessage('SilentSpec: Open the source file, not the test file'); return; }
     const log = (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    if (!ensureTrustedForManualGeneration(log)) { return; }
     try {
       const result = analyzeFile(filePath, log);
       if (!result.isTestable) { vscode.window.showWarningMessage('SilentSpec: No testable exports found'); return; }
@@ -659,8 +678,10 @@ export function activate(context: vscode.ExtensionContext) {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('silentspec.findGaps', async () => {
+    const log = (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    if (!ensureTrustedForManualGeneration(log)) { return; }
     await runGapFinder(
-      (msg: string) => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`),
+      log,
       async (_ctx: SilentSpecContext, filePath, log, abortSignal, exportedFunctions, exportTypes) => {
         if (processingQueue.size >= MAX_QUEUE_DEPTH) {
           log(`Gap Finder: queue full (${processingQueue.size}/${MAX_QUEUE_DEPTH}) — skipping`);
@@ -1151,6 +1172,7 @@ export function deactivate() {
   costAcknowledgementPromises.clear();
   processingLock.clear();
   failureNotifiedFiles.clear();
+  manualUntrustedWarningShown = false;
   lastProcessedHash.clear();
   lastProcessedTime.clear();
   activeGenerations = 0;

@@ -261,7 +261,8 @@
         "silentspec.vertex.serviceAccountKeyPath": {
           "type": "string",
           "default": "",
-          "description": "Path to a Vertex AI service account key JSON file when not using ADC."
+          "description": "Path to a Vertex AI service account key JSON file when not using ADC.",
+          "markdownDescription": "Path to a Vertex AI service account key JSON file when not using ADC. This path is stored in normal VS Code settings and may sync via Settings Sync; do not put the key file itself in your workspace."
         },
         "silentspec.vertex.useADC": {
           "type": "boolean",

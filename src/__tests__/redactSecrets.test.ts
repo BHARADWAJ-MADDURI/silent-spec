@@ -35,6 +35,13 @@ test('redacts a GitHub PAT with ghp_ prefix', () => {
   expect(result).not.toContain(token);
 });
 
+test('redacts other GitHub token prefixes', () => {
+  const token = 'gho_' + 'B'.repeat(36);
+  const result = redactSecrets(`auth failed for token ${token}`);
+  expect(result).toContain('gho_[REDACTED]');
+  expect(result).not.toContain(token);
+});
+
 test('redacts a GitHub fine-grained PAT with github_pat_ prefix', () => {
   const token = 'github_pat_' + 'A'.repeat(48);
   const result = redactSecrets(`auth failed for token ${token}`);
@@ -53,6 +60,13 @@ test('does not redact a short ghp_ string below the threshold', () => {
 test('redacts a key- prefixed token', () => {
   const result = redactSecrets('key-abcdefghijklmnopqrstuvwxyz1234567890');
   expect(result).toContain('key-[REDACTED]');
+});
+
+test('redacts labeled API key fields', () => {
+  const key = 'abcdefghijklmnopqrstuvwxyz123456';
+  const result = redactSecrets(`api-key: ${key}`);
+  expect(result).toContain('api-key=[API_KEY_REDACTED]');
+  expect(result).not.toContain(key);
 });
 
 test('redacts provider-specific cloud tokens', () => {

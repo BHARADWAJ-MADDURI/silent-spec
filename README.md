@@ -333,9 +333,9 @@ All commands are available via the Command Palette (`Cmd/Ctrl+Shift+P`):
 - **Existing SilentSpec-managed spec files** — system zones (`SS-IMPORTS`, `SS-HELPERS`, `SS-GENERATED`) are updated on each run; `SS-USER-TESTS` is never modified.
 - **`tsconfig.json`** — only if you explicitly click "Fix tsconfig automatically" in the preflight warning notification. This adds the detected framework to `compilerOptions.types`.
 
-SilentSpec never modifies source files, `node_modules`, `package.json`, or any file that does not have SilentSpec zone markers. It never modifies unmanaged test files.
+SilentSpec never modifies source files or any file that does not have SilentSpec zone markers. It never modifies unmanaged test files.
 
-**Preflight dependency install:** when `@types/jest` (or equivalent) is missing, SilentSpec asks before running the package-manager install command. If you choose not to install, SilentSpec continues in safe mode and offers the manual command instead of modifying `node_modules` or lock files.
+**Preflight dependency install:** when `@types/jest` (or equivalent) is missing, SilentSpec asks before running the package-manager install command. If you click "Install Now", the package manager may update `node_modules`, lockfiles, and package metadata such as `package.json`. If you choose not to install, SilentSpec continues in safe mode and offers the manual command instead.
 
 ### On Uninstall
 
@@ -383,6 +383,9 @@ For Ollama and vLLM pointed at a local server, generation can remain local. Sile
 - AWS Bedrock: https://aws.amazon.com/privacy/
 - Google Vertex AI: https://policies.google.com/privacy
 - Groq (default OpenAI-compatible provider): https://groq.com/privacy-policy/
+- Together AI: https://www.together.ai/privacy
+- Fireworks AI: https://fireworks.ai/privacy-policy
+- DeepSeek: https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html
 
 By using a cloud provider, you accept their data processing terms. Review your provider's policy before using SilentSpec on proprietary or sensitive code.
 
@@ -395,7 +398,7 @@ OpenAI-compatible URLs are restricted to documented HTTPS providers: Groq, Toget
 
 API keys and tokens are stored using VS Code's `SecretStorage` API (`context.secrets`), which VS Code encrypts using the OS keychain — Keychain on macOS, Credential Manager on Windows, libsecret on Linux.
 
-Keys are stored under these identifiers: `silentspec.githubToken`, `silentspec.claudeApiKey`, `silentspec.openaiApiKey`, `silentspec.azureApiKey`, `silentspec.compatApiKey`, `silentspec.bedrockAccessKeyId`, and `silentspec.bedrockSecretAccessKey`. Vertex AI uses Application Default Credentials or a service account key file path configured in settings. SecretStorage-backed keys never appear in `settings.json`, and provider error logs use best-effort secret redaction before writing to the output channel.
+Keys are stored under these identifiers: `silentspec.githubToken`, `silentspec.claudeApiKey`, `silentspec.openaiApiKey`, `silentspec.azureApiKey`, `silentspec.compatApiKey`, `silentspec.bedrockAccessKeyId`, and `silentspec.bedrockSecretAccessKey`. Vertex AI uses Application Default Credentials or a service account key file path configured in settings. The Vertex key path is normal VS Code settings data and may be synced or exposed through Settings Sync or workspace settings; do not store the key file itself in your workspace. SecretStorage-backed keys never appear in `settings.json`, and provider error logs use best-effort secret redaction before writing to the output channel.
 
 </details>
 

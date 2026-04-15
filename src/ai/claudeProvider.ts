@@ -125,12 +125,17 @@ export class ClaudeProvider implements AIProvider {
       }
 
       const data = await response.json() as {
-        content: Array<{ type: string; text: string }>;
+        content?: Array<{ type: string; text?: string }>;
       };
+
+      if (!Array.isArray(data.content)) {
+        log('Error: Claude API returned malformed response — missing content array');
+        return null;
+      }
 
       const text = data.content
         .filter(block => block.type === 'text')
-        .map(block => block.text)
+        .map(block => block.text ?? '')
         .join('');
 
       return text || null;

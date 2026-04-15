@@ -140,7 +140,7 @@ export class GitHubModelsProvider implements AIProvider {
       }
 
       const msg = error instanceof Error ? error.message : String(error);
-      log(`Error: GitHub Models API call failed — ${msg}`);
+      log(`Error: GitHub Models API call failed — ${redactSecrets(msg)}`);
       return null;
     }
   }
