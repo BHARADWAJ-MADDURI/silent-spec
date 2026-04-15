@@ -8,14 +8,13 @@
     "rootDir": "src",
     "outDir": "out",
     "strict": true,
-    "types": ["node"]
+    "types": ["node", "mocha"]
   },
   "include": [
     "src/**/*.ts"
   ],
   "exclude": [
     "src/__tests__/**/*",
-    "src/test/**/*",
     "node_modules",
     "dist",
     "out"
