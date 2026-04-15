@@ -10,7 +10,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Changed
 
-- Replaced the Marketplace version badge with a plain install link to avoid stale badge status confusion.
+- Replaced the live Marketplace version badge with a stable install badge to avoid stale status confusion.
 
 ## [1.0.0] - 2026-04-05
 

@@ -8,7 +8,7 @@
 
 SilentSpec generates only the tests you're missing — and never touches the ones you wrote.
 
-[Install from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=bharadwajmadduri.silent-spec)
+[![Install from VS Code Marketplace](https://img.shields.io/badge/VS%20Code%20Marketplace-Install-007ACC?logo=visualstudiocode&logoColor=white)](https://marketplace.visualstudio.com/items?itemName=bharadwajmadduri.silent-spec)
 [![License](https://img.shields.io/github/license/BHARADWAJ-MADDURI/silent-spec)](LICENSE)
 
 > ✔ Save a file → tests appear beside it  
