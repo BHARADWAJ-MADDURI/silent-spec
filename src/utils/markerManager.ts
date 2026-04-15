@@ -402,6 +402,98 @@ export function splitAIOutput(
   };
 }
 
+function describeLineMatchesFunction(line: string, functionNames: string[]): boolean {
+  const t = line.trim();
+  if (!t.startsWith('describe(') && !t.startsWith('describe.')) { return false; }
+
+  return functionNames.some(fn => {
+    const pattern = new RegExp(
+      `^describe(?:\\.\\w+)?\\s*\\(\\s*['"\`][^'"\`]*\\b${escapeRegex(fn)}\\b[^'"\`]*['"\`]`,
+      'i'
+    );
+    return pattern.test(t);
+  });
+}
+
+function filterGeneratedTestBodyToFunctions(testBody: string, functionNames: string[]): string {
+  if (functionNames.length === 0) { return testBody; }
+
+  const lines = testBody.split('\n');
+  const keptBlocks: string[] = [];
+  let currentBlock: string[] = [];
+  let capturing = false;
+  let keepCurrent = false;
+  let braceDepth = 0;
+
+  for (const line of lines) {
+    const t = line.trim();
+
+    if (!capturing) {
+      if (describeLineMatchesFunction(line, functionNames)) {
+        capturing = true;
+        keepCurrent = true;
+        currentBlock = [line];
+        braceDepth = (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
+
+        if (braceDepth === 0) {
+          keptBlocks.push(currentBlock.join('\n').trim());
+          capturing = false;
+          keepCurrent = false;
+          currentBlock = [];
+        }
+        continue;
+      }
+
+      // Drop top-level blocks for functions outside the current work list.
+      if (t.startsWith('describe(') || t.startsWith('describe.')) {
+        capturing = true;
+        keepCurrent = false;
+        currentBlock = [];
+        braceDepth = (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
+        if (braceDepth === 0) {
+          capturing = false;
+        }
+      }
+      continue;
+    }
+
+    if (keepCurrent) { currentBlock.push(line); }
+    braceDepth += (line.match(/\{/g) ?? []).length;
+    braceDepth -= (line.match(/\}/g) ?? []).length;
+
+    if (braceDepth === 0) {
+      if (keepCurrent) {
+        keptBlocks.push(currentBlock.join('\n').trim());
+      }
+      capturing = false;
+      keepCurrent = false;
+      currentBlock = [];
+    }
+  }
+
+  return keptBlocks.join('\n\n').trim();
+}
+
+export function filterGeneratedOutputToFunctions(
+  aiOutput: string,
+  functionNames: string[]
+): string {
+  if (functionNames.length === 0) { return aiOutput; }
+
+  const marker: SSMarker = { version: 1, covered: functionNames, pending: [] };
+  const { importsBlock, helpersBlock, testsBlock } = splitAIOutput(aiOutput, marker);
+  const { innerContent } = readMarker(testsBlock);
+  const filteredTests = filterGeneratedTestBodyToFunctions(innerContent, functionNames);
+
+  return [
+    importsBlock,
+    helpersBlock,
+    buildMarkerLine(marker),
+    filteredTests,
+    SS_END,
+  ].filter(section => section.trim().length > 0).join('\n\n');
+}
+
 // Backward-compatible alias — callers that use buildGeneratedBlock still work.
 // Returns all three buckets; generatedBlock = testsBlock.
 export function buildGeneratedBlock(

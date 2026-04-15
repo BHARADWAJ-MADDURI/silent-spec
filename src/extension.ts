@@ -7,15 +7,22 @@ import { OpenAIProvider } from './ai/openaiProvider';
 import { ClaudeProvider } from './ai/claudeProvider';
 import { OllamaProvider } from './ai/ollamaProvider';
 import { GitHubModelsProvider } from './ai/githubModelsProvider';
+import { AzureOpenAIProvider } from './ai/azureOpenAIProvider';
+import { OpenAICompatProvider } from './ai/openAICompatProvider';
+import { VllmProvider } from './ai/vllmProvider';
+import { BedrockProvider } from './ai/bedrockProvider';
+import { VertexProvider } from './ai/vertexProvider';
 import { validateResponse } from './utils/validateResponse';
 import { processingQueue } from './utils/processingQueue';
-import { writeSpecFile, appendGapTests, resolveSpecPath, updateMarker, isUnmanagedSpec } from './fileWriter';
+import { writeSpecFile, appendGapTests, resolveSpecPath, updateMarker, isUnmanagedSpec, repairSpecMetadataForCoveredFunctions } from './fileWriter';
 import { withSpecPathLock } from './utils/specPathLock';
 import { runGapFinder } from './gapFinder';
 import { buildPrompt } from './promptBuilder';
 import { extractContext, SilentSpecContext } from './contextExtractor';
 import { TelemetryService } from './telemetry';
 import { healSpec, verifyCompilation } from './utils/specHealer';
+import { parseJsonc } from './utils/jsonc';
+import { isLocalProviderBaseUrl } from './utils/providerUrlSecurity';
 import {
   SSMarker,
   readMarker,
@@ -24,14 +31,16 @@ import {
   verifyGenerated,
   buildUpdatedMarker,
   rebuildMarkerFromContent,
+  filterGeneratedOutputToFunctions,
   DEFAULT_MAX_FUNCTIONS_PER_RUN,
   MAX_RETRIES_PER_FUNCTION,
 } from './utils/markerManager';
 
 const activeControllers = new Set<AbortController>();
 const activeTimers = new Set<ReturnType<typeof setTimeout>>();
-let costCheckInProgress = false;
+const costAcknowledgementPromises = new Map<string, Promise<boolean>>();
 let cachedOllamaRunning: boolean | null = null;
+let cachedVllmRunning: boolean | null = null;
 // V1 limitation: SilentSpec uses Node fs/child_process which may not work
 // correctly in Remote SSH, Dev Containers, or WSL. Warn once per session.
 let remoteWarningShown = false;
@@ -96,7 +105,23 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   openai: 'OpenAI',
   github: 'GitHub Models',
   ollama: 'Ollama',
+  azure: 'Azure OpenAI',
+  compat: 'OpenAI-compatible',
+  vllm: 'vLLM',
+  bedrock: 'AWS Bedrock',
+  vertex: 'Google Vertex AI',
 };
+
+function getConfiguredCompatLabel(): string {
+  return vscode.workspace
+    .getConfiguration('silentspec')
+    .get<string>('compat.providerLabel', 'OpenAI-compatible');
+}
+
+function getProviderDisplayName(providerName: string): string {
+  if (providerName === 'compat') { return getConfiguredCompatLabel(); }
+  return PROVIDER_DISPLAY_NAMES[providerName] ?? providerName;
+}
 
 type FailureKind = { reason: string; isAuth: boolean };
 
@@ -114,7 +139,7 @@ function classifyProviderError(err: unknown, timedOut: boolean): FailureKind {
 function showProviderFailureToast(filePath: string, providerName: string, kind: FailureKind): void {
   if (failureNotifiedFiles.has(filePath)) { return; }
   failureNotifiedFiles.add(filePath);
-  const display = PROVIDER_DISPLAY_NAMES[providerName] ?? providerName;
+  const display = getProviderDisplayName(providerName);
   const msg = `SilentSpec: ${display} generation failed — ${kind.reason}. Save the file again to retry.`;
   if (kind.isAuth) {
     void vscode.window.showErrorMessage(msg);
@@ -127,20 +152,45 @@ async function isOllamaRunning(): Promise<boolean> {
   try { const r = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) }); return r.ok; } catch { return false; }
 }
 
+async function isVllmRunning(): Promise<boolean> {
+  const config = vscode.workspace.getConfiguration('silentspec');
+  if (!config.get<boolean>('vllm.autoDetect', true)) { return false; }
+  if (!config.get<string>('vllm.model', '')) { return false; }
+  const baseUrl = config.get<string>('vllm.baseUrl', 'http://localhost:8000/v1').replace(/\/+$/, '');
+  if (!isLocalProviderBaseUrl(baseUrl)) { return false; }
+  try {
+    const r = await fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(2000) });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function checkCostAcknowledgement(context: vscode.ExtensionContext, providerName: string): Promise<boolean> {
-  if (providerName !== 'claude' && providerName !== 'openai') { return true; }
-  if (costCheckInProgress) { return false; }
+  if (providerName !== 'claude' && providerName !== 'openai' && providerName !== 'azure' && providerName !== 'compat' && providerName !== 'bedrock' && providerName !== 'vertex') { return true; }
   const key = `silentspec.${providerName}.costAcknowledged`;
   const acknowledged = context.globalState.get<boolean>(key, false);
   if (acknowledged) { return true; }
-  costCheckInProgress = true;
-  // B4 fix: costCheckInProgress ALWAYS cleared via finally, even if modal is ignored or
-  // globalState.update throws. 30 s timeout so a dismissed/ignored notification never
-  // blocks the queue for the session — long enough for a user to read and respond.
-  try {
+  const existing = costAcknowledgementPromises.get(providerName);
+  if (existing) { return existing; }
+
+  // Reuse one modal per provider and always clear it via finally. The timeout prevents
+  // a dismissed/ignored notification from blocking the queue for the session.
+  const promise = (async () => {
     const COST_MODAL_TIMEOUT_MS = 30_000;
+    const providerLabel = providerName === 'claude'
+      ? 'Claude (Anthropic)'
+      : providerName === 'openai'
+        ? 'OpenAI'
+        : providerName === 'azure'
+          ? 'Azure OpenAI'
+          : providerName === 'bedrock'
+            ? 'AWS Bedrock'
+            : providerName === 'vertex'
+              ? 'Google Vertex AI'
+              : getConfiguredCompatLabel();
     const modalPromise = vscode.window.showWarningMessage(
-      `SilentSpec will use your ${providerName === 'claude' ? 'Claude (Anthropic)' : 'OpenAI'} API key. Typical cost is ~$0.003 per generation.`,
+      `SilentSpec will use your ${providerLabel} credentials. Typical cost depends on your configured model and provider.`,
       'I understand — continue', 'Cancel'
     );
     const timeoutPromise = new Promise<undefined>(resolve =>
@@ -150,32 +200,36 @@ async function checkCostAcknowledgement(context: vscode.ExtensionContext, provid
     if (action !== 'I understand — continue') { return false; }
     await context.globalState.update(key, true);
     return true;
-  } finally {
-    costCheckInProgress = false;
-  }
+  })().finally(() => {
+    costAcknowledgementPromises.delete(providerName);
+  });
+
+  costAcknowledgementPromises.set(providerName, promise);
+  return promise;
 }
 
 function getProvider(context: vscode.ExtensionContext, providerOverride?: string): AIProvider {
   const config = vscode.workspace.getConfiguration('silentspec');
   const providerName = providerOverride ?? config.get<string>('provider', 'github');
-  const modelOverride = config.get<string>('model', '') || undefined;
-  if (providerName === 'openai') { return new OpenAIProvider(modelOverride).withSecrets(context.secrets); }
-  if (providerName === 'claude') { return new ClaudeProvider(modelOverride).withSecrets(context.secrets); }
-  if (providerName === 'github') { return new GitHubModelsProvider(modelOverride).withSecrets(context.secrets); }
-  return new OllamaProvider(modelOverride);
+  const legacyModelOverride = config.get<string>('model', '') || undefined;
+  if (providerName === 'openai') { return new OpenAIProvider(legacyModelOverride).withSecrets(context.secrets); }
+  if (providerName === 'claude') { return new ClaudeProvider(legacyModelOverride).withSecrets(context.secrets); }
+  if (providerName === 'github') { return new GitHubModelsProvider(legacyModelOverride).withSecrets(context.secrets); }
+  if (providerName === 'ollama') { return new OllamaProvider(legacyModelOverride); }
+  if (providerName === 'azure') { return new AzureOpenAIProvider().withSecrets(context.secrets); }
+  if (providerName === 'compat') { return new OpenAICompatProvider().withSecrets(context.secrets); }
+  if (providerName === 'vllm') { return new VllmProvider(); }
+  if (providerName === 'bedrock') { return new BedrockProvider().withSecrets(context.secrets); }
+  if (providerName === 'vertex') { return new VertexProvider(); }
+  return new OllamaProvider(legacyModelOverride);
 }
 
-// Adds the framework type entry to compilerOptions.types in tsconfig.json.
-// Reads as JSONC (strips comments), modifies, writes back as formatted JSON.
-// Called from the "Fix tsconfig automatically" button in the tsconfig warning notification.
-// Returns true on success, false on failure (caller handles notifications).
 async function fixTsconfigTypes(projectRoot: string, framework: string): Promise<boolean> {
   const tsconfigUri = vscode.Uri.file(path.join(projectRoot, 'tsconfig.json'));
   try {
     const raw = await vscode.workspace.fs.readFile(tsconfigUri);
     const text = Buffer.from(raw).toString('utf8');
-    const stripped = text.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
-    const tsconfig = JSON.parse(stripped) as Record<string, unknown>;
+    const tsconfig = parseJsonc<Record<string, unknown>>(text);
     const compilerOptions = ((tsconfig['compilerOptions'] ?? {}) as Record<string, unknown>);
     const existing = [...((compilerOptions['types'] as string[] | undefined) ?? [])];
     if (!existing.includes(framework) && !existing.includes(`@types/${framework}`)) {
@@ -223,14 +277,22 @@ async function runOneGapBatch(
   previousPending: string[], provider: AIProvider, providerName: string,
   context: vscode.ExtensionContext, telemetry: TelemetryService,
   log: (msg: string) => void, updateStatusBar: (text?: string) => void,
-  healerMode?: 'full' | 'safe'
+  healerMode?: 'full' | 'safe',
+  forcedWorkList?: string[]
 ): Promise<string[]> {
   const specPath = await resolveSpecPath(filePath);
   let existingMarker = null;
-  try { const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath)); const { marker } = readMarker(Buffer.from(bytes).toString('utf8')); existingMarker = marker; } catch { /* no existing spec */ }
+  try {
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+    const specContent = Buffer.from(bytes).toString('utf8');
+    const { marker } = readMarker(specContent);
+    existingMarker = rebuildMarkerFromContent(specContent, exportedFunctions) ?? marker;
+  } catch { /* no existing spec */ }
   const reconciled = reconcile(existingMarker, exportedFunctions);
   const maxPerRun = vscode.workspace.getConfiguration('silentspec').get<number>('maxFunctionsPerRun', DEFAULT_MAX_FUNCTIONS_PER_RUN);
-  const workList = computeWorkList(reconciled, maxPerRun);
+  const workList = forcedWorkList && forcedWorkList.length > 0
+    ? forcedWorkList.slice(0, Math.max(1, maxPerRun))
+    : computeWorkList(reconciled, maxPerRun);
   if (workList.length === 0) { log('Gap batch: all functions covered'); return []; }
   const astResult = analyzeFile(filePath, log);
   if (!astResult.isTestable) { log('Gap batch: source is no longer testable — stopping'); return []; }
@@ -276,7 +338,7 @@ async function runOneGapBatch(
     const finalContent = healResult.wasHealed ? healResult.healed : fixedValidated;
     if (healResult.wasHealed) { log(`Healer: removed ${healResult.healedCount} test(s) — reasons: ${JSON.stringify(healResult.removedTestReasons)}`); telemetry.recordHealing(healResult.healedCount, 0); }
     const updatedMarker = buildUpdatedMarker(reconciled.covered, nowCovered, nowPending);
-    await appendGapTests(filePath, finalContent, updatedMarker, log);
+    await appendGapTests(filePath, finalContent, updatedMarker, log, nowCovered);
     telemetry.recordSuccess(providerName, nowCovered, nowPending);
     const diskVerify = verifyCompilation(specPath, log);
     const gapSpecCompileReady = diskVerify.clean;
@@ -288,7 +350,22 @@ async function runOneGapBatch(
     log(`[SilentSpec] Spec written: yes`);
     log(`[SilentSpec] Spec compile-ready: ${gapSpecCompileReady ? 'yes' : 'no'}`);
     log(`[SilentSpec] Reason: ${gapSpecReason}`);
-    return nowPending;
+    try {
+      const latestBytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+      const latestContent = Buffer.from(latestBytes).toString('utf8');
+      const latestMarker = rebuildMarkerFromContent(latestContent, exportedFunctions);
+      if (latestMarker) {
+        const diskHasThisBatch = nowCovered.every(fn => latestMarker.covered.includes(fn));
+        if (diskHasThisBatch) {
+          return exportedFunctions.filter(fn => !latestMarker.covered.includes(fn));
+        }
+        log('Gap batch: disk marker lagged current batch — using verified in-memory coverage');
+      }
+    } catch {
+      log('Gap batch: could not re-read marker after append — falling back to current pending list');
+    }
+    const coveredAfterThisBatch = new Set([...reconciled.covered, ...nowCovered]);
+    return exportedFunctions.filter(fn => !coveredAfterThisBatch.has(fn));
   } finally { activeControllers.delete(controller); }
 }
 
@@ -326,6 +403,11 @@ export function activate(context: vscode.ExtensionContext) {
       claude: 'Claude (Anthropic)',
       openai: 'OpenAI',
       ollama: 'Ollama (local)',
+      azure: 'Azure OpenAI',
+      compat: getConfiguredCompatLabel(),
+      vllm: 'vLLM (local)',
+      bedrock: 'AWS Bedrock',
+      vertex: 'Google Vertex AI',
     };
     const configuredProvider = vscode.workspace.getConfiguration('silentspec').get<string>('provider', 'github');
     const providerLabel = providerLabels[configuredProvider] ?? 'your configured AI provider';
@@ -347,6 +429,7 @@ export function activate(context: vscode.ExtensionContext) {
   // so users can see them. Falls back to console.error until this wiring runs.
   processingQueue.setErrorLogger(msg => outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`));
   void isOllamaRunning().then(running => { cachedOllamaRunning = running; });
+  void isVllmRunning().then(running => { cachedVllmRunning = running; });
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = 'silentspec.togglePause';
   let isPaused = context.workspaceState.get<boolean>('silentspec.paused', false);
@@ -354,8 +437,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   function updateStatusBar(text?: string) {
     if (text) { statusBar.text = text; statusBar.backgroundColor = undefined; return; }
-    statusBar.text = isPaused ? '$(debug-pause) Paused' : `SilentSpec $(check) — ${lastUsedProvider}`;
-    statusBar.tooltip = isPaused ? 'SilentSpec paused — click to resume' : `SilentSpec active — using ${lastUsedProvider}. Click to pause.`;
+    const displayProvider = getProviderDisplayName(lastUsedProvider);
+    statusBar.text = isPaused ? '$(debug-pause) Paused' : `SilentSpec $(check) — ${displayProvider}`;
+    statusBar.tooltip = isPaused ? 'SilentSpec paused — click to resume' : `SilentSpec active — using ${displayProvider}. Click to pause.`;
     statusBar.backgroundColor = isPaused ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
   }
 
@@ -401,8 +485,8 @@ export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('silentspec');
     const providerInspect = config.inspect<string>('provider');
     const isExplicitlySet = (providerInspect?.workspaceFolderValue ?? providerInspect?.workspaceValue ?? providerInspect?.globalValue) !== undefined;
-    const configuredProvider = config.get<string>('provider', 'github');
     if (!isExplicitlySet && cachedOllamaRunning === true) { return getProvider(context, 'ollama'); }
+    if (!isExplicitlySet && cachedVllmRunning === true) { return getProvider(context, 'vllm'); }
     return getProvider(context);
   }
 
@@ -412,6 +496,7 @@ export function activate(context: vscode.ExtensionContext) {
     const isExplicitlySet = (providerInspect?.workspaceFolderValue ?? providerInspect?.workspaceValue ?? providerInspect?.globalValue) !== undefined;
     const configuredProvider = config.get<string>('provider', 'github');
     if (!isExplicitlySet && cachedOllamaRunning === true) { return 'ollama'; }
+    if (!isExplicitlySet && cachedVllmRunning === true) { return 'vllm'; }
     return configuredProvider;
   }
 
@@ -426,13 +511,67 @@ export function activate(context: vscode.ExtensionContext) {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('silentspec.setApiKey', async () => {
-    const provider = await vscode.window.showQuickPick(['claude', 'openai', 'github'], { placeHolder: 'Select provider to set API key for' });
+    const provider = await vscode.window.showQuickPick(['claude', 'openai', 'github', 'azure', 'compat', 'bedrock', 'vertex'], { placeHolder: 'Select provider to set API key or credentials for' });
     if (!provider) { return; }
-    const key = await vscode.window.showInputBox({ prompt: `Enter your ${provider === 'claude' ? 'Anthropic' : provider === 'github' ? 'GitHub' : 'OpenAI'} API key`, password: true, ignoreFocusOut: true, placeHolder: provider === 'claude' ? 'sk-ant-...' : provider === 'github' ? 'ghp_...' : 'sk-...' });
+    if (provider === 'vertex') {
+      void vscode.commands.executeCommand(
+        'workbench.action.openSettings',
+        '@ext:bharadwajmadduri.silent-spec vertex'
+      );
+      return;
+    }
+    if (provider === 'bedrock') {
+      const accessKeyId = await vscode.window.showInputBox({
+        prompt: 'Enter your AWS access key ID',
+        ignoreFocusOut: true,
+        placeHolder: 'AKIA...'
+      });
+      if (!accessKeyId || accessKeyId.trim().length === 0) { return; }
+      const secretAccessKey = await vscode.window.showInputBox({
+        prompt: 'Enter your AWS secret access key',
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (!secretAccessKey || secretAccessKey.trim().length === 0) { return; }
+      await context.secrets.store('silentspec.bedrockAccessKeyId', accessKeyId.trim());
+      await context.secrets.store('silentspec.bedrockSecretAccessKey', secretAccessKey.trim());
+      vscode.window.showInformationMessage('SilentSpec: AWS Bedrock credentials saved');
+      return;
+    }
+
+    const providerLabel = provider === 'claude'
+      ? 'Anthropic'
+      : provider === 'github'
+        ? 'GitHub'
+        : provider === 'azure'
+          ? 'Azure OpenAI'
+          : provider === 'compat'
+            ? getConfiguredCompatLabel()
+            : 'OpenAI';
+    const key = await vscode.window.showInputBox({
+      prompt: `Enter your ${providerLabel} API key`,
+      password: true,
+      ignoreFocusOut: true,
+      placeHolder: provider === 'claude'
+        ? 'sk-ant-...'
+        : provider === 'github'
+          ? 'ghp_...'
+          : provider === 'azure'
+            ? 'Azure API key'
+            : 'sk-...'
+    });
     if (!key || key.trim().length === 0) { return; }
-    const secretKey = provider === 'claude' ? 'silentspec.claudeApiKey' : provider === 'github' ? 'silentspec.githubToken' : 'silentspec.openaiApiKey';
+    const secretKey = provider === 'claude'
+      ? 'silentspec.claudeApiKey'
+      : provider === 'github'
+        ? 'silentspec.githubToken'
+        : provider === 'azure'
+          ? 'silentspec.azureApiKey'
+          : provider === 'compat'
+            ? 'silentspec.compatApiKey'
+            : 'silentspec.openaiApiKey';
     await context.secrets.store(secretKey, key.trim());
-    vscode.window.showInformationMessage(`SilentSpec: ${provider === 'claude' ? 'Claude' : provider === 'github' ? 'GitHub' : 'OpenAI'} API key saved`);
+    vscode.window.showInformationMessage(`SilentSpec: ${providerLabel} API key saved`);
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('silentspec.openLog', () => outputChannel.show()));
@@ -544,13 +683,15 @@ export function activate(context: vscode.ExtensionContext) {
           updateStatusBar('$(sync~spin) Generating...');
           const specPath = await resolveSpecPath(filePath);
           await withSpecPathLock(specPath, async () => {
-            let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full');
+            let pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, [], provider, providerName, context, telemetry, log, updateStatusBar, 'full', _ctx.workList);
+            let previousGapPending: string[] = [];
             while (pendingToResume.length > 0) {
-              const retryable = filterRetryable(pendingToResume, pendingToResume, log);
+              const retryable = filterRetryable(pendingToResume, previousGapPending, log);
               if (retryable.length === 0) { log('Gap Finder: all pending functions hit retry cap — stopping'); break; }
               log(`Gap Finder: ${retryable.length} function(s) pending — continuing loop...`);
               updateStatusBar(`$(sync~spin) Generating... (${retryable.length} pending)...`);
-              pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar, 'full');
+              previousGapPending = pendingToResume;
+              pendingToResume = await runOneGapBatch(filePath, exportedFunctions, exportTypes, pendingToResume, provider, providerName, context, telemetry, log, updateStatusBar, 'full', retryable);
             }
           });
           log('Gap Finder: done');
@@ -596,7 +737,22 @@ export function activate(context: vscode.ExtensionContext) {
 
         let existingCovered: string[] = [];
         let previousPending: string[] = [];
-        try { const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath)); const { marker } = readMarker(Buffer.from(bytes).toString('utf8')); existingCovered = marker?.covered ?? []; previousPending = marker?.pending ?? []; } catch { /* first run */ }
+        try {
+          const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(specPath));
+          const specContent = Buffer.from(bytes).toString('utf8');
+          const { marker } = readMarker(specContent);
+          const authoritativeMarker = rebuildMarkerFromContent(specContent, exportedFunctions) ?? marker;
+          if (marker && authoritativeMarker && authoritativeMarker.covered.join(',') !== marker.covered.join(',')) {
+            log(`Marker reconciled from generated content — covered: [${authoritativeMarker.covered.join(', ')}] pending: [${authoritativeMarker.pending.join(', ')}]`);
+          }
+          existingCovered = authoritativeMarker?.covered ?? [];
+          previousPending = authoritativeMarker?.pending ?? [];
+          const repairedMarker = await repairSpecMetadataForCoveredFunctions(filePath, exportedFunctions, log);
+          if (repairedMarker) {
+            existingCovered = repairedMarker.covered;
+            previousPending = repairedMarker.pending;
+          }
+        } catch { /* first run */ }
 
         const reconciled = reconcile(
           existingCovered.length > 0 || previousPending.length > 0 ? { version: 1, covered: existingCovered, pending: previousPending } : null,
@@ -665,32 +821,23 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         // tsconfig types-array warning: @types installed but not referenced in tsconfig.
-        // Auto-fix silently; only prompt if the write fails. Does not affect generation.
+        // Prompt before mutating project config. Does not affect generation.
         if (ctx.tsconfigTypesWarning && ctx.preflightProjectRoot &&
             !tsconfigWarningShownRoots.has(ctx.preflightProjectRoot)) {
           tsconfigWarningShownRoots.add(ctx.preflightProjectRoot);
           const root = ctx.preflightProjectRoot;
           const fw   = ctx.framework;
           void (async () => {
+            const choice = await vscode.window.showWarningMessage(
+              `SilentSpec: @types/${fw} is installed but not referenced in tsconfig.json. Add "types": ["${fw}"] to compilerOptions?`,
+              'Fix tsconfig automatically',
+              'Skip'
+            );
+            if (choice !== 'Fix tsconfig automatically') { return; }
             const ok = await fixTsconfigTypes(root, fw);
             if (ok) {
-              // Bug 2 fix — tsconfig is now correct; mark root as fully verified so
-              // pre-flight doesn't re-run the tsconfig check on the next save.
               checkedRoots.add(root);
               void vscode.window.showInformationMessage(`SilentSpec added "${fw}" to tsconfig.json types array.`);
-            } else {
-              // Write failed — fall back to manual instruction with buttons.
-              void vscode.window.showWarningMessage(
-                `SilentSpec: @types/${fw} is installed but not referenced in tsconfig.json. Add "types": ["${fw}"] to compilerOptions.`,
-                'Fix tsconfig automatically'
-              ).then(async choice => {
-                if (choice === 'Fix tsconfig automatically') {
-                  const retry = await fixTsconfigTypes(root, fw);
-                  if (retry) {
-                    void vscode.window.showInformationMessage(`SilentSpec added "${fw}" to tsconfig.json types array.`);
-                  }
-                } 
-              });
             }
           })();
         }
@@ -797,7 +944,10 @@ export function activate(context: vscode.ExtensionContext) {
           const isAddingOnlyNewFunctions = workList.every(fn => !existingCovered.includes(fn)) && existingCovered.length > 0;
           const writeMode = isAddingOnlyNewFunctions ? 'append' : 'replace';
           log(`Write mode: ${writeMode} (${workList.length}/${exportedFunctions.length} functions)`);
-          const specWritten = await writeSpecFile(filePath, finalContent, log, updatedMarker, exportedFunctions, writeMode);
+          const contentToWrite = writeMode === 'append'
+            ? filterGeneratedOutputToFunctions(finalContent, nowCovered)
+            : finalContent;
+          const specWritten = await writeSpecFile(filePath, contentToWrite, log, updatedMarker, exportedFunctions, writeMode);
           if (!specWritten) { return; }
           // Open spec in split panel on first creation (controlled by silentspec.openSpecOnCreate)
           if (existingCovered.length === 0 && vscode.workspace.getConfiguration('silentspec').get<boolean>('openSpecOnCreate', true)) {
@@ -998,6 +1148,7 @@ export function deactivate() {
   for (const controller of activeControllers) { controller.abort(); }
   activeControllers.clear();
   pendingRetryCount.clear();
+  costAcknowledgementPromises.clear();
   processingLock.clear();
   failureNotifiedFiles.clear();
   lastProcessedHash.clear();

@@ -10,6 +10,7 @@ import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import { readMarker, updateMarkerOnly } from './utils/markerManager';
 import { isUnmanagedSpec } from './utils/unmanagedSpec';
+import { parseJsonc } from './utils/jsonc';
 
 const execAsync = promisify(execCb);
 
@@ -147,11 +148,7 @@ async function checkTsconfigTypes(
   const tsconfigPath = path.join(projectRoot, 'tsconfig.json');
   try {
     const raw = await fs.readFile(tsconfigPath, 'utf8');
-    // Strip // line comments and /* */ block comments so JSON.parse works on JSONC
-    const stripped = raw
-      .replace(/\/\/[^\n]*/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '');
-    const tsconfig = JSON.parse(stripped) as Record<string, unknown>;
+    const tsconfig = parseJsonc<Record<string, unknown>>(raw);
     const compilerOptions = tsconfig['compilerOptions'] as Record<string, unknown> | undefined;
     if (!compilerOptions) {
       emit(`Pre-flight: no compilerOptions in tsconfig — adding types entry for ${framework}`);
@@ -333,18 +330,40 @@ async function runPreflightCheck(ctx: SilentSpecContext, filePath: string, updat
   const installCmd  = buildInstallCommand(pm, installPkgs);
   const displayCmd  = FRAMEWORK_DISPLAY_CMDS[ctx.framework] ?? FRAMEWORK_DISPLAY_CMDS['jest'];
 
+  const installAction = await vscode.window.showWarningMessage(
+    `SilentSpec detected missing ${ctx.framework} test dependencies. Install them now? Command: ${installCmd}`,
+    'Install Now',
+    'Copy Command',
+    'Skip'
+  );
+
+  if (installAction === 'Copy Command') {
+    await vscode.env.clipboard.writeText(installCmd);
+    log(`Pre-flight: copied install command for ${ctx.framework} — entering safe mode`);
+    return { mode: 'safe', projectRoot, displayCmd, installCmd, typesWarning: true, installAttempted: false };
+  }
+
+  if (installAction !== 'Install Now') {
+    log(`Pre-flight: user skipped install for ${ctx.framework} — entering safe mode`);
+    return { mode: 'safe', projectRoot, displayCmd, installCmd, typesWarning: true, installAttempted: false };
+  }
+
   updateStatus?.('$(sync~spin) Installing types...');
   try {
     await execAsync(installCmd, { cwd: projectRoot, timeout: 30_000 });
     log(`SilentSpec: set up test environment (${ctx.framework}) in ${projectRoot}`);
     if (notifiedRoots.has(projectRoot)) { notifiedRoots.delete(projectRoot); }
-    checkedRoots.add(projectRoot);
     updateStatus?.('$(check) Types installed');
     setTimeout(() => updateStatus?.(''), 3000);
     if (!installSuccessNotifiedRoots.has(projectRoot)) {
       installSuccessNotifiedRoots.add(projectRoot);
       void vscode.window.showInformationMessage(`SilentSpec: Installed @types/${ctx.framework}. Save again to apply.`);
     }
+    const tsconfigTypesWarning = await checkTsconfigTypes(projectRoot, ctx.framework, log);
+    if (tsconfigTypesWarning) {
+      return { ...full, projectRoot, installAttempted: true, tsconfigTypesWarning: true };
+    }
+    checkedRoots.add(projectRoot);
     return { ...full, projectRoot, installAttempted: true };
   } catch {
     // Install failed — enter degraded mode. Do NOT cache so we retry on next save.
@@ -491,6 +510,9 @@ async function handleFileSave(
         : `file too large (${content.length} chars)`;
       log(`Skipped: ${reason} — ${filePath}`);
       updateStatus(`$(circle-slash) Skipped: file too large`);
+      void vscode.window.showInformationMessage(
+        `SilentSpec skipped ${path.basename(filePath)} because it is too large for safe generation (${lines.length} lines, ${content.length} chars).`
+      );
       setTimeout(() => updateStatus(''), 3000);
       return;
     }

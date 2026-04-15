@@ -263,7 +263,11 @@ function buildFunctionSection(ctx: SilentSpecContext): string {
   const truncatedFns = targetFns.filter(fn => !isVisible(fn));
 
   const list = visibleFns.map(f => `- ${f}`).join('\n');
-  let result = `## Functions to Test\nGenerate tests for ALL of these — do not skip any:\n${list}`;
+  let result = [
+    '## Functions to Test',
+    'Generate tests ONLY for these functions — do not skip any and do not generate tests for any other exported functions:',
+    list,
+  ].join('\n');
 
   if (truncatedFns.length > 0) {
     result += `\n\nThese functions are outside the source window but their signatures`;
