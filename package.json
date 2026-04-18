@@ -3,7 +3,7 @@
   "publisher": "bharadwajmadduri",
   "displayName": "SilentSpec",
   "description": "Auto-generates unit tests on file save using AI — silent, surgical, zero friction",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.109.0"
@@ -314,11 +314,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/bharadwajmadduri/silent-spec"
+    "url": "https://github.com/BHARADWAJ-MADDURI/silent-spec.git"
   },
   "bugs": {
-    "url": "https://github.com/bharadwajmadduri/silent-spec/issues"
+    "url": "https://github.com/BHARADWAJ-MADDURI/silent-spec/issues"
   },
-  "homepage": "https://github.com/bharadwajmadduri/silent-spec#readme",
+  "homepage": "https://github.com/BHARADWAJ-MADDURI/silent-spec#readme",
   "icon": "icon.png"
 }
